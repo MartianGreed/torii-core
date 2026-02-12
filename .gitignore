@@ -14,3 +14,5 @@ flamegraph.svg
 perf.data*
 
 .claude-modified-files
+.DS_Store
+**/.DS_Store

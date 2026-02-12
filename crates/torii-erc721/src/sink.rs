@@ -126,6 +126,28 @@ impl Erc721Sink {
 
         true
     }
+
+    /// Filter function for ERC721 token metadata updates.
+    ///
+    /// Supports filters:
+    /// - "token": Filter by token contract address (hex string)
+    fn matches_metadata_filters(
+        metadata: &proto::TokenMetadataEntry,
+        filters: &HashMap<String, String>,
+    ) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        if let Some(token_filter) = filters.get("token") {
+            let token_hex = format!("0x{}", hex::encode(&metadata.token));
+            if !token_hex.eq_ignore_ascii_case(token_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[async_trait]
@@ -258,7 +280,11 @@ impl Sink for Erc721Sink {
             let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
             for token in new_tokens {
                 match self.storage.has_token_metadata(token) {
-                    Ok(false) => {
+                    Ok(exists) => {
+                        if exists {
+                            continue;
+                        }
+
                         let meta = fetcher.fetch_erc721_metadata(token).await;
                         tracing::info!(
                             target: "torii_erc721::sink",
@@ -278,9 +304,33 @@ impl Sink for Erc721Sink {
                                 error = %e,
                                 "Failed to store token metadata"
                             );
+                        } else if let Some(event_bus) = &self.event_bus {
+                            let meta_entry = proto::TokenMetadataEntry {
+                                token: token.to_bytes_be().to_vec(),
+                                name: meta.name,
+                                symbol: meta.symbol,
+                                total_supply: meta.total_supply.map(u256_to_bytes),
+                            };
+
+                            let mut buf = Vec::new();
+                            meta_entry.encode(&mut buf)?;
+                            let any = Any {
+                                type_url:
+                                    "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
+                                        .to_string(),
+                                value: buf,
+                            };
+
+                            event_bus.publish_protobuf(
+                                "erc721.metadata",
+                                "erc721.metadata",
+                                &any,
+                                &meta_entry,
+                                UpdateType::Created,
+                                Self::matches_metadata_filters,
+                            );
                         }
                     }
-                    Ok(true) => {}
                     Err(e) => {
                         tracing::warn!(target: "torii_erc721::sink", error = %e, "Failed to check token metadata");
                     }
@@ -429,16 +479,23 @@ impl Sink for Erc721Sink {
     }
 
     fn topics(&self) -> Vec<TopicInfo> {
-        vec![TopicInfo::new(
-            "erc721.transfer",
-            vec![
-                "token".to_string(),
-                "from".to_string(),
-                "to".to_string(),
-                "wallet".to_string(),
-            ],
-            "ERC721 NFT transfers. Use 'wallet' filter for from OR to matching.",
-        )]
+        vec![
+            TopicInfo::new(
+                "erc721.transfer",
+                vec![
+                    "token".to_string(),
+                    "from".to_string(),
+                    "to".to_string(),
+                    "wallet".to_string(),
+                ],
+                "ERC721 NFT transfers. Use 'wallet' filter for from OR to matching.",
+            ),
+            TopicInfo::new(
+                "erc721.metadata",
+                vec!["token".to_string()],
+                "ERC721 token metadata updates (registered/updated token attributes).",
+            ),
+        ]
     }
 
     fn build_routes(&self) -> Router {

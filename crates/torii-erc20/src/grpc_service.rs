@@ -6,10 +6,11 @@
 //! - Indexer statistics (GetStats)
 
 use crate::proto::{
-    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
-    GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
-    GetStatsRequest, GetStatsResponse, GetTokenMetadataRequest, GetTokenMetadataResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest,
+    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, BalanceEntry,
+    Cursor, GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
+    GetBalancesRequest, GetBalancesResponse, GetStatsRequest, GetStatsResponse,
+    GetTokenMetadataRequest, GetTokenMetadataResponse, GetTransfersRequest, GetTransfersResponse,
+    SubscribeApprovalsRequest,
     SubscribeTransfersRequest, TokenMetadataEntry, Transfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{
@@ -395,6 +396,52 @@ impl Erc20Trait for Erc20Service {
         }))
     }
 
+    /// Query balances in batch with optional token/wallet filters
+    async fn get_balances(
+        &self,
+        request: Request<GetBalancesRequest>,
+    ) -> Result<Response<GetBalancesResponse>, Status> {
+        let req = request.into_inner();
+
+        let token = req.token.as_ref().and_then(|b| bytes_to_felt(b));
+        let wallet = req.wallet.as_ref().and_then(|b| bytes_to_felt(b));
+        let cursor = req.cursor;
+        let limit = if req.limit == 0 {
+            1000
+        } else {
+            req.limit.min(10_000)
+        };
+
+        tracing::debug!(
+            target: "torii_erc20::grpc",
+            "GetBalances: token={:?}, wallet={:?}, cursor={:?}, limit={}",
+            token.map(|t| format!("{t:#x}")),
+            wallet.map(|w| format!("{w:#x}")),
+            cursor,
+            limit
+        );
+
+        let (balances, next_cursor) = self
+            .storage
+            .get_balances_filtered(token, wallet, cursor, limit)
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let rows = balances
+            .into_iter()
+            .map(|b| BalanceEntry {
+                token: b.token.to_bytes_be().to_vec(),
+                wallet: b.wallet.to_bytes_be().to_vec(),
+                balance: u256_to_bytes(b.balance),
+                last_block: b.last_block,
+            })
+            .collect();
+
+        Ok(Response::new(GetBalancesResponse {
+            balances: rows,
+            next_cursor,
+        }))
+    }
+
     /// Get token metadata (name, symbol, decimals)
     async fn get_token_metadata(
         &self,
@@ -417,12 +464,22 @@ impl Erc20Trait for Erc20Service {
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
             };
 
-            return Ok(Response::new(GetTokenMetadataResponse { tokens: entries }));
+            return Ok(Response::new(GetTokenMetadataResponse {
+                tokens: entries,
+                next_cursor: None,
+            }));
         }
 
-        let all = self
+        let cursor = req.cursor.as_ref().and_then(|b| bytes_to_felt(b));
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1000)
+        };
+
+        let (all, next_cursor) = self
             .storage
-            .get_all_token_metadata()
+            .get_token_metadata_paginated(cursor, limit)
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let entries = all
@@ -435,7 +492,10 @@ impl Erc20Trait for Erc20Service {
             })
             .collect();
 
-        Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        Ok(Response::new(GetTokenMetadataResponse {
+            tokens: entries,
+            next_cursor: next_cursor.map(|c| c.to_bytes_be().to_vec()),
+        }))
     }
 
     /// Subscribe to real-time transfer events with filtering

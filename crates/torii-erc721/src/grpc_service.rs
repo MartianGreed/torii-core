@@ -268,12 +268,22 @@ impl Erc721Trait for Erc721Service {
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
             };
 
-            return Ok(Response::new(GetTokenMetadataResponse { tokens: entries }));
+            return Ok(Response::new(GetTokenMetadataResponse {
+                tokens: entries,
+                next_cursor: None,
+            }));
         }
 
-        let all = self
+        let cursor = req.cursor.as_ref().and_then(|b| bytes_to_felt(b));
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1000)
+        };
+
+        let (all, next_cursor) = self
             .storage
-            .get_all_token_metadata()
+            .get_token_metadata_paginated(cursor, limit)
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let entries = all
@@ -286,7 +296,10 @@ impl Erc721Trait for Erc721Service {
             })
             .collect();
 
-        Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        Ok(Response::new(GetTokenMetadataResponse {
+            tokens: entries,
+            next_cursor: next_cursor.map(|c| c.to_bytes_be().to_vec()),
+        }))
     }
 
     /// Subscribe to real-time transfer events

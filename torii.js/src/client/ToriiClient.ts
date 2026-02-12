@@ -18,7 +18,7 @@
 
 import { BaseSinkClient } from './BaseSinkClient';
 import { GrpcTransport } from './GrpcTransport';
-import { decodeProtobufObject } from './protobuf';
+import { decodeProtobufObject, decodeWithSchema, getSchemaRegistry } from './protobuf';
 
 // Type for a client class constructor
 type ClientClass<T extends BaseSinkClient = BaseSinkClient> = new (baseUrl: string) => T;
@@ -134,6 +134,8 @@ class ToriiClientImpl<T extends ClientMap = {}> {
     onConnected?: () => void
   ): Promise<() => void> {
     this._abortController = new AbortController();
+    const registry = getSchemaRegistry();
+    const topicUpdateSchema = registry['torii.TopicUpdate'] || registry['TopicUpdate'];
 
     const topicsEncoded = topics.map((t) => {
       const sub: Record<string, unknown> = { f1: t.topic };
@@ -153,21 +155,72 @@ class ToriiClientImpl<T extends ClientMap = {}> {
         for await (const response of this._transport.streamCall<Record<string, unknown>>(
           '/torii.Torii/SubscribeToTopicsStream',
           request,
-          { abort: this._abortController?.signal, onConnected }
+          {
+            abort: this._abortController?.signal,
+            onConnected,
+            responseSchema: topicUpdateSchema,
+          }
         )) {
-          let data = response.f5;
-          if (data instanceof Uint8Array) {
+          const normalized = topicUpdateSchema
+            ? response
+            : {
+                topic: String(response.f1 ?? ''),
+                updateType: Number(response.f2 ?? 0),
+                timestamp: Number(response.f3 ?? 0),
+                typeId: String(response.f4 ?? ''),
+                data: response.f5,
+              };
+
+          let data = (normalized as Record<string, unknown>).data;
+
+          if (data && typeof data === 'object') {
+            const anyData = data as Record<string, unknown>;
+            const typeUrl =
+              typeof anyData.typeUrl === 'string' ? (anyData.typeUrl as string) : '';
+            const anyValue = anyData.value;
+
+            if (typeUrl && anyValue instanceof Uint8Array) {
+              const fullTypeName = typeUrl.split('/').pop() ?? '';
+              const shortTypeName = fullTypeName.split('.').pop() ?? '';
+              const payloadSchema = registry[fullTypeName] || registry[shortTypeName];
+
+              if (payloadSchema) {
+                try {
+                  data = {
+                    typeUrl,
+                    value: decodeWithSchema(anyValue, payloadSchema),
+                  };
+                } catch {
+                  data = {
+                    typeUrl,
+                    value: decodeProtobufObject(anyValue),
+                  };
+                }
+              } else {
+                try {
+                  data = {
+                    typeUrl,
+                    value: decodeProtobufObject(anyValue),
+                  };
+                } catch {
+                  // Keep raw Any when payload cannot be decoded.
+                }
+              }
+            }
+          } else if (data instanceof Uint8Array) {
+            // Backward compatibility if no schema is registered.
             try {
               data = decodeProtobufObject(data);
             } catch {
               // Leave as raw bytes
             }
           }
+
           onUpdate({
-            topic: String(response.f1 ?? ''),
-            updateType: Number(response.f2 ?? 0),
-            timestamp: Number(response.f3 ?? 0),
-            typeId: String(response.f4 ?? ''),
+            topic: String((normalized as Record<string, unknown>).topic ?? ''),
+            updateType: Number((normalized as Record<string, unknown>).updateType ?? 0),
+            timestamp: Number((normalized as Record<string, unknown>).timestamp ?? 0),
+            typeId: String((normalized as Record<string, unknown>).typeId ?? ''),
             data,
           });
         }

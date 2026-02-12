@@ -146,6 +146,13 @@ export function truncateAddress(address: string, chars = 6): string {
 }
 
 /**
+ * Build a Cartridge explorer URL for a contract/address.
+ */
+export function getContractExplorerUrl(address: string): string {
+  return `https://explorer.cartridge.gg/contract/${address}`;
+}
+
+/**
  * Get update type name from enum value
  */
 export function getUpdateTypeName(type: number): string {

@@ -186,6 +186,10 @@ message TransferUpdate {
 message GetTokenMetadataRequest {
     // Token contract address (32 bytes). If empty, returns all tokens.
     optional bytes token = 1;
+    // Cursor token (exclusive). Only used when token is not set.
+    optional bytes cursor = 2;
+    // Maximum number of entries to return (default: 100, max: 1000).
+    uint32 limit = 3;
 }
 
 // Token metadata entry
@@ -204,6 +208,8 @@ message TokenMetadataEntry {
 message GetTokenMetadataResponse {
     // Token metadata entries
     repeated TokenMetadataEntry tokens = 1;
+    // Cursor for next page (absent if no more results).
+    optional bytes next_cursor = 2;
 }
 
 // ===== Stats =====

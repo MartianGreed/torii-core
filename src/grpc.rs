@@ -228,7 +228,7 @@ impl Torii for ToriiService {
         let client_id = sub_req.client_id.clone();
 
         // Register client and set up subscriptions
-        subscription_manager.register_client(client_id.clone(), tx);
+        subscription_manager.register_client(client_id.clone(), tx.clone());
         subscription_manager.update_subscriptions(
             &client_id,
             sub_req.topics,
@@ -241,12 +241,12 @@ impl Torii for ToriiService {
             client_id
         );
 
-        // Spawn task to clean up on disconnect
+        // Clean up as soon as the stream receiver is dropped (client disconnects).
+        // This avoids stale client entries accumulating in SubscriptionManager.
         let cleanup_manager = subscription_manager;
         let cleanup_id = client_id;
         tokio::spawn(async move {
-            // Wait for receiver to be dropped (client disconnects)
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            tx.closed().await;
             cleanup_manager.unregister_client(&cleanup_id);
         });
 

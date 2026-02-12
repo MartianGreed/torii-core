@@ -186,12 +186,48 @@ message GetBalanceResponse {
     uint64 last_block = 2;
 }
 
+// Balance row for batch balance queries
+message BalanceEntry {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // Wallet address (32 bytes)
+    bytes wallet = 2;
+    // Balance as U256 (variable length, up to 32 bytes)
+    bytes balance = 3;
+    // Last block number where balance was updated
+    uint64 last_block = 4;
+}
+
+// Request for GetBalances RPC (batch balance query)
+message GetBalancesRequest {
+    // Optional token filter. If set, only balances for this token.
+    optional bytes token = 1;
+    // Optional wallet filter. If set, only balances for this wallet.
+    optional bytes wallet = 2;
+    // Cursor from previous response (row id). Omit for first page.
+    optional int64 cursor = 3;
+    // Maximum number of rows to return (default: 1000, max: 10000)
+    uint32 limit = 4;
+}
+
+// Response for GetBalances RPC
+message GetBalancesResponse {
+    // List of balances matching filters
+    repeated BalanceEntry balances = 1;
+    // Cursor for next page (absent if no more results)
+    optional int64 next_cursor = 2;
+}
+
 // ===== Token Metadata =====
 
 // Request for GetTokenMetadata RPC
 message GetTokenMetadataRequest {
     // Token contract address (32 bytes). If empty, returns all tokens.
     optional bytes token = 1;
+    // Cursor token (exclusive). Only used when token is not set.
+    optional bytes cursor = 2;
+    // Maximum number of entries to return (default: 100, max: 1000).
+    uint32 limit = 3;
 }
 
 // Token metadata entry
@@ -210,6 +246,8 @@ message TokenMetadataEntry {
 message GetTokenMetadataResponse {
     // Token metadata entries
     repeated TokenMetadataEntry tokens = 1;
+    // Cursor for next page (absent if no more results).
+    optional bytes next_cursor = 2;
 }
 
 // ===== Stats =====
@@ -241,6 +279,9 @@ service Erc20 {
 
     // Get balance for a specific token and wallet
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+
+    // Query balances in batch with optional token/wallet filters
+    rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
 
     // Get token metadata (name, symbol, decimals)
     rpc GetTokenMetadata(GetTokenMetadataRequest) returns (GetTokenMetadataResponse);

@@ -2,11 +2,14 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt, U256};
+use starknet::core::codec::Decode;
+use starknet::core::types::{ByteArray, EmittedEvent, Felt, U256};
+use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use std::any::Any;
 use std::collections::HashMap;
 use torii::etl::{Decoder, Envelope, TypedBody};
+use torii_common::bytes_to_u256;
 
 /// TransferSingle event from ERC1155 token
 #[derive(Debug, Clone)]
@@ -93,6 +96,30 @@ impl TypedBody for OperatorApproval {
     }
 }
 
+/// URI event from ERC1155 token
+#[derive(Debug, Clone)]
+pub struct UriUpdate {
+    pub token: Felt,
+    pub token_id: U256,
+    pub uri: String,
+    pub block_number: u64,
+    pub transaction_hash: Felt,
+}
+
+impl TypedBody for UriUpdate {
+    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
+        torii::etl::envelope::TypeId::new("erc1155.uri")
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// ERC1155 event decoder
 ///
 /// Decodes multiple ERC1155 events:
@@ -108,6 +135,10 @@ impl Erc1155Decoder {
         Self
     }
 
+    fn felt_to_u256(felt: Felt) -> U256 {
+        bytes_to_u256(&felt.to_bytes_be())
+    }
+
     /// TransferSingle event selector: sn_keccak("TransferSingle")
     fn transfer_single_selector() -> Felt {
         selector!("TransferSingle")
@@ -121,6 +152,46 @@ impl Erc1155Decoder {
     /// ApprovalForAll event selector: sn_keccak("ApprovalForAll")
     fn approval_for_all_selector() -> Felt {
         selector!("ApprovalForAll")
+    }
+
+    /// URI event selector: sn_keccak("URI")
+    fn uri_selector() -> Felt {
+        selector!("URI")
+    }
+
+    fn decode_string_result(result: &[Felt]) -> Option<String> {
+        if result.is_empty() {
+            return None;
+        }
+
+        if result.len() == 1 {
+            return parse_cairo_short_string(&result[0])
+                .ok()
+                .filter(|s| !s.is_empty());
+        }
+
+        if let Ok(byte_array) = ByteArray::decode(result) {
+            if let Ok(s) = String::try_from(byte_array) {
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+
+        let len: usize = result[0].try_into().unwrap_or(0usize);
+        if len > 0 && len < 1000 && result.len() >= len + 1 {
+            let mut out = String::new();
+            for felt in &result[1..=len] {
+                if let Ok(chunk) = parse_cairo_short_string(felt) {
+                    out.push_str(&chunk);
+                }
+            }
+            if !out.is_empty() {
+                return Some(out);
+            }
+        }
+
+        None
     }
 
     /// Decode TransferSingle event into envelope
@@ -180,10 +251,8 @@ impl Erc1155Decoder {
             operator = event.keys[1];
             from = event.keys[2];
             to = event.keys[3];
-            let id_felt: u128 = event.data[0].try_into().unwrap_or(0);
-            id = U256::from(id_felt);
-            let value_felt: u128 = event.data[1].try_into().unwrap_or(0);
-            value = U256::from(value_felt);
+            id = Self::felt_to_u256(event.data[0]);
+            value = Self::felt_to_u256(event.data[1]);
         } else {
             tracing::warn!(
                 target: "torii_erc1155::decoder",
@@ -285,33 +354,70 @@ impl Erc1155Decoder {
         let ids_len: usize = event.data[data_offset].try_into().unwrap_or(0);
         data_offset += 1;
 
-        let mut ids: Vec<U256> = Vec::with_capacity(ids_len);
-        for i in 0..ids_len {
-            if data_offset + i * 2 + 1 >= event.data.len() {
+        fn parse_u256_slice(items: &[Felt], as_pairs: bool) -> Vec<U256> {
+            if as_pairs {
+                let mut out = Vec::with_capacity(items.len() / 2);
+                for chunk in items.chunks_exact(2) {
+                    let low: u128 = chunk[0].try_into().unwrap_or(0);
+                    let high: u128 = chunk[1].try_into().unwrap_or(0);
+                    out.push(U256::from_words(low, high));
+                }
+                out
+            } else {
+                items
+                    .iter()
+                    .copied()
+                    .map(Erc1155Decoder::felt_to_u256)
+                    .collect()
+            }
+        }
+
+        let mut ids: Vec<U256> = Vec::new();
+        let mut values: Vec<U256> = Vec::new();
+        let mut parsed = false;
+
+        // Try both pair-based and single-felt array layouts for ids and values.
+        // Standard Starknet ERC1155 uses U256 pairs, but some contracts emit felt arrays.
+        for ids_as_pairs in [true, false] {
+            let id_words = if ids_as_pairs { 2 } else { 1 };
+            let ids_end = data_offset.saturating_add(ids_len.saturating_mul(id_words));
+            if ids_end > event.data.len() || ids_end >= event.data.len() {
+                continue;
+            }
+
+            let candidate_ids = parse_u256_slice(&event.data[data_offset..ids_end], ids_as_pairs);
+            let values_len: usize = event.data[ids_end].try_into().unwrap_or(0);
+            let values_start = ids_end + 1;
+
+            for values_as_pairs in [true, false] {
+                let value_words = if values_as_pairs { 2 } else { 1 };
+                let values_end = values_start.saturating_add(values_len.saturating_mul(value_words));
+                if values_end > event.data.len() {
+                    continue;
+                }
+
+                ids = candidate_ids.clone();
+                values =
+                    parse_u256_slice(&event.data[values_start..values_end], values_as_pairs);
+                parsed = true;
                 break;
             }
-            let low: u128 = event.data[data_offset + i * 2].try_into().unwrap_or(0);
-            let high: u128 = event.data[data_offset + i * 2 + 1].try_into().unwrap_or(0);
-            ids.push(U256::from_words(low, high));
-        }
-        data_offset += ids_len * 2;
 
-        // Parse values array
-        if event.data.len() <= data_offset {
+            if parsed {
+                break;
+            }
+        }
+
+        if !parsed {
+            tracing::warn!(
+                target: "torii_erc1155::decoder",
+                token = %format!("{:#x}", event.from_address),
+                tx_hash = %format!("{:#x}", event.transaction_hash),
+                block_number = event.block_number.unwrap_or(0),
+                ids_len = ids_len,
+                "Failed to parse ERC1155 TransferBatch ids/values arrays"
+            );
             return Ok(vec![]);
-        }
-
-        let values_len: usize = event.data[data_offset].try_into().unwrap_or(0);
-        data_offset += 1;
-
-        let mut values: Vec<U256> = Vec::with_capacity(values_len);
-        for i in 0..values_len {
-            if data_offset + i * 2 + 1 >= event.data.len() {
-                break;
-            }
-            let low: u128 = event.data[data_offset + i * 2].try_into().unwrap_or(0);
-            let high: u128 = event.data[data_offset + i * 2 + 1].try_into().unwrap_or(0);
-            values.push(U256::from_words(low, high));
         }
 
         // Create envelope for each id/value pair
@@ -415,6 +521,54 @@ impl Erc1155Decoder {
             metadata,
         )))
     }
+
+    /// Decode URI event into envelope
+    ///
+    /// Common ERC1155 Starknet layout:
+    /// - keys[0]: URI selector
+    /// - keys[1]: token id (felt-encoded)
+    /// - data: URI payload (short string or ByteArray)
+    async fn decode_uri(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+        if event.keys.len() < 2 || event.data.is_empty() {
+            return Ok(None);
+        }
+
+        let token_id = Self::felt_to_u256(event.keys[1]);
+        let Some(uri) = Self::decode_string_result(&event.data) else {
+            return Ok(None);
+        };
+
+        let uri_update = UriUpdate {
+            token: event.from_address,
+            token_id,
+            uri,
+            block_number: event.block_number.unwrap_or(0),
+            transaction_hash: event.transaction_hash,
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
+        metadata.insert(
+            "block_number".to_string(),
+            event.block_number.unwrap_or(0).to_string(),
+        );
+        metadata.insert(
+            "tx_hash".to_string(),
+            format!("{:#x}", event.transaction_hash),
+        );
+
+        let envelope_id = format!(
+            "erc1155_uri_{}_{}",
+            event.block_number.unwrap_or(0),
+            format!("{:#x}", event.transaction_hash)
+        );
+
+        Ok(Some(Envelope::new(
+            envelope_id,
+            Box::new(uri_update),
+            metadata,
+        )))
+    }
 }
 
 impl Default for Erc1155Decoder {
@@ -444,6 +598,10 @@ impl Decoder for Erc1155Decoder {
             return self.decode_transfer_batch(event).await;
         } else if selector == Self::approval_for_all_selector() {
             if let Some(envelope) = self.decode_approval_for_all(event).await? {
+                return Ok(vec![envelope]);
+            }
+        } else if selector == Self::uri_selector() {
+            if let Some(envelope) = self.decode_uri(event).await? {
                 return Ok(vec![envelope]);
             }
         } else {
@@ -536,5 +694,117 @@ mod tests {
         assert_eq!(approval.owner, Felt::from(0xau64));
         assert_eq!(approval.operator, Felt::from(0xbu64));
         assert!(approval.approved);
+    }
+
+    #[tokio::test]
+    async fn test_decode_transfer_single_single_felt_preserves_full_felt() {
+        let decoder = Erc1155Decoder::new();
+
+        let id_felt =
+            Felt::from_hex("0x100000000000000000000000000000001").expect("invalid id felt");
+        let value_felt =
+            Felt::from_hex("0x200000000000000000000000000000003").expect("invalid value felt");
+
+        let event = EmittedEvent {
+            from_address: Felt::from(0x123u64),
+            keys: vec![
+                Erc1155Decoder::transfer_single_selector(),
+                Felt::from(0x1u64),
+                Felt::from(0x2u64),
+                Felt::from(0x3u64),
+            ],
+            data: vec![id_felt, value_felt],
+            block_hash: None,
+            block_number: Some(101),
+            transaction_hash: Felt::from(0xabcdu64),
+        };
+
+        let envelopes = decoder.decode_event(&event).await.unwrap();
+        assert_eq!(envelopes.len(), 1);
+
+        let transfer = envelopes[0]
+            .body
+            .as_any()
+            .downcast_ref::<TransferSingle>()
+            .unwrap();
+
+        assert_eq!(transfer.id, Erc1155Decoder::felt_to_u256(id_felt));
+        assert_eq!(transfer.value, Erc1155Decoder::felt_to_u256(value_felt));
+    }
+
+    #[tokio::test]
+    async fn test_decode_transfer_batch_single_felt_arrays() {
+        let decoder = Erc1155Decoder::new();
+
+        let event = EmittedEvent {
+            from_address: Felt::from(0x123u64),
+            keys: vec![
+                Erc1155Decoder::transfer_batch_selector(),
+                Felt::from(0x1u64), // operator
+                Felt::from(0x2u64), // from
+                Felt::from(0x3u64), // to
+            ],
+            data: vec![
+                Felt::from(2u64),   // ids_len
+                Felt::from(11u64),  // id[0]
+                Felt::from(12u64),  // id[1]
+                Felt::from(2u64),   // values_len
+                Felt::from(101u64), // value[0]
+                Felt::from(102u64), // value[1]
+            ],
+            block_hash: None,
+            block_number: Some(102),
+            transaction_hash: Felt::from(0xabcfu64),
+        };
+
+        let envelopes = decoder.decode_event(&event).await.unwrap();
+        assert_eq!(envelopes.len(), 2);
+
+        let first = envelopes[0]
+            .body
+            .as_any()
+            .downcast_ref::<TransferBatch>()
+            .unwrap();
+        let second = envelopes[1]
+            .body
+            .as_any()
+            .downcast_ref::<TransferBatch>()
+            .unwrap();
+
+        assert_eq!(first.id, U256::from(11u64));
+        assert_eq!(first.value, U256::from(101u64));
+        assert_eq!(second.id, U256::from(12u64));
+        assert_eq!(second.value, U256::from(102u64));
+    }
+
+    #[tokio::test]
+    async fn test_decode_uri_event() {
+        let decoder = Erc1155Decoder::new();
+
+        // "abc" as short string felt
+        let uri_felt = Felt::from(0x616263u64);
+        let event = EmittedEvent {
+            from_address: Felt::from(0x123u64),
+            keys: vec![
+                Erc1155Decoder::uri_selector(),
+                Felt::from(7u64), // token id
+            ],
+            data: vec![uri_felt],
+            block_hash: None,
+            block_number: Some(103),
+            transaction_hash: Felt::from(0xabd0u64),
+        };
+
+        let envelopes = decoder.decode_event(&event).await.unwrap();
+        assert_eq!(envelopes.len(), 1);
+
+        let uri = envelopes[0]
+            .body
+            .as_any()
+            .downcast_ref::<UriUpdate>()
+            .unwrap();
+        assert_eq!(uri.token, Felt::from(0x123u64));
+        assert_eq!(uri.token_id, U256::from(7u64));
+        assert_eq!(uri.uri, "abc".to_string());
     }
 }

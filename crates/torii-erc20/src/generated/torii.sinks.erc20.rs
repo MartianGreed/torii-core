@@ -212,12 +212,60 @@ pub struct GetBalanceResponse {
     #[prost(uint64, tag = "2")]
     pub last_block: u64,
 }
+/// Balance row for batch balance queries
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BalanceEntry {
+    /// Token contract address (32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    /// Wallet address (32 bytes)
+    #[prost(bytes = "vec", tag = "2")]
+    pub wallet: ::prost::alloc::vec::Vec<u8>,
+    /// Balance as U256 (variable length, up to 32 bytes)
+    #[prost(bytes = "vec", tag = "3")]
+    pub balance: ::prost::alloc::vec::Vec<u8>,
+    /// Last block number where balance was updated
+    #[prost(uint64, tag = "4")]
+    pub last_block: u64,
+}
+/// Request for GetBalances RPC (batch balance query)
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalancesRequest {
+    /// Optional token filter. If set, only balances for this token.
+    #[prost(bytes = "vec", optional, tag = "1")]
+    pub token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Optional wallet filter. If set, only balances for this wallet.
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub wallet: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Cursor from previous response (row id). Omit for first page.
+    #[prost(int64, optional, tag = "3")]
+    pub cursor: ::core::option::Option<i64>,
+    /// Maximum number of rows to return (default: 1000, max: 10000)
+    #[prost(uint32, tag = "4")]
+    pub limit: u32,
+}
+/// Response for GetBalances RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalancesResponse {
+    /// List of balances matching filters
+    #[prost(message, repeated, tag = "1")]
+    pub balances: ::prost::alloc::vec::Vec<BalanceEntry>,
+    /// Cursor for next page (absent if no more results)
+    #[prost(int64, optional, tag = "2")]
+    pub next_cursor: ::core::option::Option<i64>,
+}
 /// Request for GetTokenMetadata RPC
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetTokenMetadataRequest {
     /// Token contract address (32 bytes). If empty, returns all tokens.
     #[prost(bytes = "vec", optional, tag = "1")]
     pub token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Cursor token (exclusive). Only used when token is not set.
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Maximum number of entries to return (default: 100, max: 1000).
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
 }
 /// Token metadata entry
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -241,6 +289,9 @@ pub struct GetTokenMetadataResponse {
     /// Token metadata entries
     #[prost(message, repeated, tag = "1")]
     pub tokens: ::prost::alloc::vec::Vec<TokenMetadataEntry>,
+    /// Cursor for next page (absent if no more results).
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub next_cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Request for GetStats RPC
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -329,6 +380,14 @@ pub mod erc20_server {
             request: tonic::Request<super::GetBalanceRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetBalanceResponse>,
+            tonic::Status,
+        >;
+        /// Query balances in batch with optional token/wallet filters
+        async fn get_balances(
+            &self,
+            request: tonic::Request<super::GetBalancesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetBalancesResponse>,
             tonic::Status,
         >;
         /// Get token metadata (name, symbol, decimals)
@@ -571,6 +630,49 @@ pub mod erc20_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetBalanceSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc20.Erc20/GetBalances" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetBalancesSvc<T: Erc20>(pub Arc<T>);
+                    impl<T: Erc20> tonic::server::UnaryService<super::GetBalancesRequest>
+                    for GetBalancesSvc<T> {
+                        type Response = super::GetBalancesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetBalancesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc20>::get_balances(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetBalancesSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -194,6 +194,28 @@ impl Erc20Sink {
 
         true
     }
+
+    /// Filter function for ERC20 token metadata updates.
+    ///
+    /// Supports filters:
+    /// - "token": Filter by token contract address (hex string)
+    fn matches_metadata_filters(
+        metadata: &proto::TokenMetadataEntry,
+        filters: &HashMap<String, String>,
+    ) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        if let Some(token_filter) = filters.get("token") {
+            let token_hex = format!("0x{}", hex::encode(&metadata.token));
+            if !token_hex.eq_ignore_ascii_case(token_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[async_trait]
@@ -275,7 +297,11 @@ impl Sink for Erc20Sink {
 
             for token in new_tokens {
                 match self.storage.has_token_metadata(token) {
-                    Ok(false) => {
+                    Ok(exists) => {
+                        if exists {
+                            continue;
+                        }
+
                         let meta = fetcher.fetch_erc20_metadata(token).await;
                         tracing::info!(
                             target: "torii_erc20::sink",
@@ -297,9 +323,33 @@ impl Sink for Erc20Sink {
                                 error = %e,
                                 "Failed to store token metadata"
                             );
+                        } else if let Some(event_bus) = &self.event_bus {
+                            let meta_entry = proto::TokenMetadataEntry {
+                                token: token.to_bytes_be().to_vec(),
+                                name: meta.name,
+                                symbol: meta.symbol,
+                                decimals: meta.decimals.map(|d| d as u32),
+                            };
+
+                            let mut buf = Vec::new();
+                            meta_entry.encode(&mut buf)?;
+                            let any = Any {
+                                type_url:
+                                    "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
+                                        .to_string(),
+                                value: buf,
+                            };
+
+                            event_bus.publish_protobuf(
+                                "erc20.metadata",
+                                "erc20.metadata",
+                                &any,
+                                &meta_entry,
+                                UpdateType::Created,
+                                Self::matches_metadata_filters,
+                            );
                         }
                     }
-                    Ok(true) => {} // Already have metadata
                     Err(e) => {
                         tracing::warn!(
                             target: "torii_erc20::sink",
@@ -543,6 +593,11 @@ impl Sink for Erc20Sink {
                     "account".to_string(),
                 ],
                 "ERC20 token approvals. Use 'account' filter for owner OR spender matching.",
+            ),
+            TopicInfo::new(
+                "erc20.metadata",
+                vec!["token".to_string()],
+                "ERC20 token metadata updates (registered/updated token attributes).",
             ),
         ]
     }

@@ -14,11 +14,11 @@
 use crate::balance_fetcher::Erc1155BalanceFetcher;
 use crate::decoder::{
     OperatorApproval as DecodedOperatorApproval, TransferBatch as DecodedTransferBatch,
-    TransferSingle as DecodedTransferSingle,
+    TransferSingle as DecodedTransferSingle, UriUpdate as DecodedUriUpdate,
 };
 use crate::grpc_service::Erc1155Service;
 use crate::proto;
-use crate::storage::{Erc1155Storage, OperatorApprovalData, TokenTransferData};
+use crate::storage::{Erc1155Storage, OperatorApprovalData, TokenTransferData, TokenUriData};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::Router;
@@ -149,6 +149,55 @@ impl Erc1155Sink {
 
         true
     }
+
+    /// Filter function for ERC1155 token metadata updates.
+    ///
+    /// Supports filters:
+    /// - "token": Filter by token contract address (hex string)
+    fn matches_metadata_filters(
+        metadata: &proto::TokenMetadataEntry,
+        filters: &HashMap<String, String>,
+    ) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        if let Some(token_filter) = filters.get("token") {
+            let token_hex = format!("0x{}", hex::encode(&metadata.token));
+            if !token_hex.eq_ignore_ascii_case(token_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Filter function for ERC1155 URI updates.
+    ///
+    /// Supports filters:
+    /// - "token": Filter by token contract address (hex string)
+    /// - "token_id": Filter by token id (hex string)
+    fn matches_uri_filters(uri: &proto::TokenUri, filters: &HashMap<String, String>) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        if let Some(token_filter) = filters.get("token") {
+            let token_hex = format!("0x{}", hex::encode(&uri.token));
+            if !token_hex.eq_ignore_ascii_case(token_filter) {
+                return false;
+            }
+        }
+
+        if let Some(token_id_filter) = filters.get("token_id") {
+            let token_id_hex = format!("0x{}", hex::encode(&uri.token_id));
+            if !token_id_hex.eq_ignore_ascii_case(token_id_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[async_trait]
@@ -162,6 +211,7 @@ impl Sink for Erc1155Sink {
             TypeId::new("erc1155.transfer_single"),
             TypeId::new("erc1155.transfer_batch"),
             TypeId::new("erc1155.approval_for_all"),
+            TypeId::new("erc1155.uri"),
         ]
     }
 
@@ -178,6 +228,7 @@ impl Sink for Erc1155Sink {
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
         let mut transfers: Vec<TokenTransferData> = Vec::new();
         let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
+        let mut uri_updates: Vec<TokenUriData> = Vec::new();
 
         // Get block timestamps from batch
         let block_timestamps: HashMap<u64, i64> = batch
@@ -255,6 +306,20 @@ impl Sink for Erc1155Sink {
                     });
                 }
             }
+            // Handle URI updates
+            else if envelope.type_id == TypeId::new("erc1155.uri") {
+                if let Some(uri) = envelope.body.as_any().downcast_ref::<DecodedUriUpdate>() {
+                    let timestamp = block_timestamps.get(&uri.block_number).copied();
+                    uri_updates.push(TokenUriData {
+                        token: uri.token,
+                        token_id: uri.token_id,
+                        uri: uri.uri.clone(),
+                        block_number: uri.block_number,
+                        tx_hash: uri.transaction_hash,
+                        timestamp,
+                    });
+                }
+            }
         }
 
         // Fetch metadata for any new token contracts
@@ -262,7 +327,11 @@ impl Sink for Erc1155Sink {
             let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
             for token in new_tokens {
                 match self.storage.has_token_metadata(token) {
-                    Ok(false) => {
+                    Ok(exists) => {
+                        if exists {
+                            continue;
+                        }
+
                         let meta = fetcher.fetch_erc1155_metadata(token).await;
                         tracing::info!(
                             target: "torii_erc1155::sink",
@@ -282,9 +351,33 @@ impl Sink for Erc1155Sink {
                                 error = %e,
                                 "Failed to store token metadata"
                             );
+                        } else if let Some(event_bus) = &self.event_bus {
+                            let meta_entry = proto::TokenMetadataEntry {
+                                token: token.to_bytes_be().to_vec(),
+                                name: meta.name,
+                                symbol: meta.symbol,
+                                total_supply: meta.total_supply.map(u256_to_bytes),
+                            };
+
+                            let mut buf = Vec::new();
+                            meta_entry.encode(&mut buf)?;
+                            let any = Any {
+                                type_url:
+                                    "type.googleapis.com/torii.sinks.erc1155.TokenMetadataEntry"
+                                        .to_string(),
+                                value: buf,
+                            };
+
+                            event_bus.publish_protobuf(
+                                "erc1155.metadata",
+                                "erc1155.metadata",
+                                &any,
+                                &meta_entry,
+                                UpdateType::Created,
+                                Self::matches_metadata_filters,
+                            );
                         }
                     }
-                    Ok(true) => {}
                     Err(e) => {
                         tracing::warn!(target: "torii_erc1155::sink", error = %e, "Failed to check token metadata");
                     }
@@ -476,6 +569,57 @@ impl Sink for Erc1155Sink {
             }
         }
 
+        // Batch upsert token URI updates
+        if !uri_updates.is_empty() {
+            match self.storage.upsert_token_uris_batch(&uri_updates) {
+                Ok(count) => {
+                    tracing::info!(
+                        target: "torii_erc1155::sink",
+                        count = count,
+                        "Batch upserted token URI updates"
+                    );
+
+                    // Publish URI updates to topic subscribers
+                    if let Some(event_bus) = &self.event_bus {
+                        for uri in &uri_updates {
+                            let proto_uri = proto::TokenUri {
+                                token: uri.token.to_bytes_be().to_vec(),
+                                token_id: u256_to_bytes(uri.token_id),
+                                uri: uri.uri.clone(),
+                                block_number: uri.block_number,
+                            };
+
+                            let mut buf = Vec::new();
+                            proto_uri.encode(&mut buf)?;
+                            let any = Any {
+                                type_url: "type.googleapis.com/torii.sinks.erc1155.TokenUri"
+                                    .to_string(),
+                                value: buf,
+                            };
+
+                            event_bus.publish_protobuf(
+                                "erc1155.uri",
+                                "erc1155.uri",
+                                &any,
+                                &proto_uri,
+                                UpdateType::Updated,
+                                Self::matches_uri_filters,
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "torii_erc1155::sink",
+                        count = uri_updates.len(),
+                        error = %e,
+                        "Failed to batch upsert token URI updates"
+                    );
+                    return Err(e);
+                }
+            }
+        }
+
         // Log combined statistics
         if !transfers.is_empty() || !operator_approvals.is_empty() {
             if let Ok(total_transfers) = self.storage.get_transfer_count() {
@@ -498,16 +642,28 @@ impl Sink for Erc1155Sink {
     }
 
     fn topics(&self) -> Vec<TopicInfo> {
-        vec![TopicInfo::new(
-            "erc1155.transfer",
-            vec![
-                "token".to_string(),
-                "from".to_string(),
-                "to".to_string(),
-                "wallet".to_string(),
-            ],
-            "ERC1155 token transfers. Use 'wallet' filter for from OR to matching.",
-        )]
+        vec![
+            TopicInfo::new(
+                "erc1155.transfer",
+                vec![
+                    "token".to_string(),
+                    "from".to_string(),
+                    "to".to_string(),
+                    "wallet".to_string(),
+                ],
+                "ERC1155 token transfers. Use 'wallet' filter for from OR to matching.",
+            ),
+            TopicInfo::new(
+                "erc1155.metadata",
+                vec!["token".to_string()],
+                "ERC1155 token metadata updates (registered/updated token attributes).",
+            ),
+            TopicInfo::new(
+                "erc1155.uri",
+                vec!["token".to_string(), "token_id".to_string()],
+                "ERC1155 token URI updates (registered/updated token attributes).",
+            ),
+        ]
     }
 
     fn build_routes(&self) -> Router {

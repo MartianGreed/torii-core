@@ -384,8 +384,23 @@ function mapFieldNumbersToNames<T>(
     }
 
     // Handle google.protobuf.Any specially
-    if (fieldSchema.messageType === 'Any' && typeof value === 'object' && value !== null) {
-      const anyValue = value as Record<string, unknown>;
+    if (fieldSchema.messageType === 'Any') {
+      let anyRaw: unknown = value;
+      if (anyRaw instanceof Uint8Array) {
+        try {
+          anyRaw = decodeProtobufObject(anyRaw);
+        } catch {
+          result[fieldName] = { typeUrl: '', value: anyRaw };
+          continue;
+        }
+      }
+
+      if (typeof anyRaw !== 'object' || anyRaw === null) {
+        result[fieldName] = { typeUrl: '', value: anyRaw };
+        continue;
+      }
+
+      const anyValue = anyRaw as Record<string, unknown>;
       const typeUrl = String(anyValue.f1 ?? '');
       const innerValue = anyValue.f2;
 
@@ -395,6 +410,18 @@ function mapFieldNumbersToNames<T>(
 
       // Try to find schema by short name or full name
       const innerSchema = schemaRegistry[typeName] || schemaRegistry[fullTypeName];
+
+      if (innerSchema && innerValue instanceof Uint8Array) {
+        try {
+          result[fieldName] = {
+            typeUrl,
+            value: decodeWithSchema(innerValue, innerSchema),
+          };
+          continue;
+        } catch {
+          // Fall through and keep raw value below.
+        }
+      }
 
       if (innerSchema && typeof innerValue === 'object' && innerValue !== null) {
         result[fieldName] = {

@@ -724,185 +724,103 @@ impl Erc721Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    // ===== Token URI methods =====
-
-    /// Upsert a token URI entry and parse attributes from metadata_json
-    pub fn upsert_token_uri(
+    /// Get token metadata with cursor-based pagination.
+    ///
+    /// Returns at most `limit` rows and an optional next cursor token.
+    pub fn get_token_metadata_paginated(
         &self,
-        token: Felt,
-        token_id: U256,
-        uri: Option<&str>,
-        metadata_json: Option<&str>,
-    ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(
+        Vec<(Felt, Option<String>, Option<String>, Option<U256>)>,
+        Option<Felt>,
+    )> {
+        let conn = self.conn.lock().unwrap();
+        let fetch_limit = limit.max(1).min(1000) as usize + 1;
 
-        tx.execute(
-            "INSERT INTO token_uris (token, token_id, uri, metadata_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))
-             ON CONFLICT(token, token_id) DO UPDATE SET
-                 uri = COALESCE(excluded.uri, token_uris.uri),
-                 metadata_json = COALESCE(excluded.metadata_json, token_uris.metadata_json),
-                 updated_at = excluded.updated_at",
-            rusqlite::params![
-                felt_to_blob(token),
-                u256_to_blob(token_id),
-                uri,
-                metadata_json,
-            ],
-        )?;
-
-        if let Some(json_str) = metadata_json {
-            Self::parse_and_store_attributes(&tx, token, token_id, json_str)?;
-        }
-
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Parse metadata JSON and store key-value attributes
-    fn parse_and_store_attributes(
-        tx: &rusqlite::Transaction<'_>,
-        token: Felt,
-        token_id: U256,
-        json_str: &str,
-    ) -> Result<()> {
-        let json: serde_json::Value = match serde_json::from_str(json_str) {
-            Ok(v) => v,
-            Err(_) => return Ok(()),
+        let mut out = if let Some(cursor_token) = cursor {
+            let cursor_blob = felt_to_blob(cursor_token);
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, total_supply
+                 FROM token_metadata
+                 WHERE token > ?1
+                 ORDER BY token ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![&cursor_blob, fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    supply_bytes.map(|b| blob_to_u256(&b)),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, total_supply
+                 FROM token_metadata
+                 ORDER BY token ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    supply_bytes.map(|b| blob_to_u256(&b)),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        let obj = match json.as_object() {
-            Some(o) => o,
-            None => return Ok(()),
+        let capped = limit.max(1).min(1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
         };
 
-        let token_blob = felt_to_blob(token);
-        let token_id_blob = u256_to_blob(token_id);
-
-        // Clear existing attributes for this token
-        tx.execute(
-            "DELETE FROM token_attributes WHERE token = ?1 AND token_id = ?2",
-            rusqlite::params![&token_blob, &token_id_blob],
-        )?;
-
-        let mut stmt = tx.prepare_cached(
-            "INSERT OR REPLACE INTO token_attributes (token, token_id, key, value)
-             VALUES (?1, ?2, ?3, ?4)",
-        )?;
-
-        // Store top-level scalar fields (skip attributes array and nested objects)
-        for (key, value) in obj {
-            if key == "attributes" || key == "properties" {
-                continue;
-            }
-            let value_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null
-                | serde_json::Value::Object(_)
-                | serde_json::Value::Array(_) => continue,
-                other => other.to_string(),
-            };
-            stmt.execute(rusqlite::params![
-                &token_blob,
-                &token_id_blob,
-                key,
-                &value_str
-            ])?;
-        }
-
-        // Parse OpenSea-style attributes array: [{"trait_type": "...", "value": "..."}]
-        if let Some(attrs) = obj.get("attributes").and_then(|v| v.as_array()) {
-            for attr in attrs {
-                let attr_obj = match attr.as_object() {
-                    Some(o) => o,
-                    None => continue,
-                };
-
-                let key = match attr_obj.get("trait_type").and_then(|v| v.as_str()) {
-                    Some(k) => k,
-                    None => continue,
-                };
-
-                let value = match attr_obj.get("value") {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(serde_json::Value::Null) | None => continue,
-                    Some(other) => other.to_string(),
-                };
-
-                stmt.execute(rusqlite::params![&token_blob, &token_id_blob, key, &value])?;
-            }
-        }
-
-        // Parse properties map: {"key": "value", ...} or {"key": {"value": "..."}}
-        if let Some(props) = obj.get("properties").and_then(|v| v.as_object()) {
-            for (key, value) in props {
-                let value_str = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Object(o) => {
-                        // Handle {"value": "..."} nested format
-                        match o.get("value") {
-                            Some(serde_json::Value::String(s)) => s.clone(),
-                            Some(serde_json::Value::Null) | None => continue,
-                            Some(other) => other.to_string(),
-                        }
-                    }
-                    serde_json::Value::Null | serde_json::Value::Array(_) => continue,
-                    other => other.to_string(),
-                };
-                stmt.execute(rusqlite::params![
-                    &token_blob,
-                    &token_id_blob,
-                    key,
-                    &value_str
-                ])?;
-            }
-        }
-
-        Ok(())
+        Ok((out, next_cursor))
     }
 
-    /// Check if a token URI exists
+    /// Returns true if a token URI row exists for `(token, token_id)`.
     pub fn has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let token_id_blob = u256_to_blob(token_id);
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM token_uris WHERE token = ?1 AND token_id = ?2",
-            rusqlite::params![felt_to_blob(token), u256_to_blob(token_id)],
+            params![&token_blob, &token_id_blob],
             |row| row.get(0),
         )?;
         Ok(count > 0)
     }
 
-    /// Get a token URI entry
-    pub fn get_token_uri(
-        &self,
-        token: Felt,
-        token_id: U256,
-    ) -> Result<Option<(Option<String>, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
-        let result = conn
-            .query_row(
-                "SELECT uri, metadata_json FROM token_uris WHERE token = ?1 AND token_id = ?2",
-                rusqlite::params![felt_to_blob(token), u256_to_blob(token_id)],
-                |row| {
-                    let uri: Option<String> = row.get(0)?;
-                    let metadata_json: Option<String> = row.get(1)?;
-                    Ok((uri, metadata_json))
-                },
-            )
-            .ok();
-        Ok(result)
-    }
-
-    /// Get all token URIs for a contract
+    /// Returns all token URI rows for a given contract.
     pub fn get_token_uris_by_contract(
         &self,
         token: Felt,
     ) -> Result<Vec<(U256, Option<String>, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT token_id, uri, metadata_json FROM token_uris WHERE token = ?1")?;
-        let rows = stmt.query_map(rusqlite::params![felt_to_blob(token)], |row| {
+        let token_blob = felt_to_blob(token);
+        let mut stmt = conn.prepare(
+            "SELECT token_id, uri, metadata_json
+             FROM token_uris
+             WHERE token = ?1
+             ORDER BY token_id ASC",
+        )?;
+        let rows = stmt.query_map(params![&token_blob], |row| {
             let token_id_bytes: Vec<u8> = row.get(0)?;
             let uri: Option<String> = row.get(1)?;
             let metadata_json: Option<String> = row.get(2)?;
@@ -910,88 +828,69 @@ impl Erc721Storage {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
-
-    /// Get attributes for a specific token
-    pub fn get_token_attributes(
-        &self,
-        token: Felt,
-        token_id: U256,
-    ) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM token_attributes WHERE token = ?1 AND token_id = ?2 ORDER BY key",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![felt_to_blob(token), u256_to_blob(token_id)],
-            |row| {
-                let key: String = row.get(0)?;
-                let value: String = row.get(1)?;
-                Ok((key, value))
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Get all tokens that have a specific attribute key-value pair
-    pub fn get_tokens_by_attribute(
-        &self,
-        token: Option<Felt>,
-        key: &str,
-        value: Option<&str>,
-    ) -> Result<Vec<(Felt, U256, String)>> {
-        let conn = self.conn.lock().unwrap();
-
-        let (query, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(contract) =
-            token
-        {
-            if let Some(val) = value {
-                (
-                    "SELECT token, token_id, value FROM token_attributes WHERE token = ?1 AND key = ?2 AND value = ?3".to_string(),
-                    vec![Box::new(felt_to_blob(contract)), Box::new(key.to_string()), Box::new(val.to_string())],
-                )
-            } else {
-                (
-                    "SELECT token, token_id, value FROM token_attributes WHERE token = ?1 AND key = ?2".to_string(),
-                    vec![Box::new(felt_to_blob(contract)), Box::new(key.to_string())],
-                )
-            }
-        } else if let Some(val) = value {
-            (
-                "SELECT token, token_id, value FROM token_attributes WHERE key = ?1 AND value = ?2"
-                    .to_string(),
-                vec![Box::new(key.to_string()), Box::new(val.to_string())],
-            )
-        } else {
-            (
-                "SELECT token, token_id, value FROM token_attributes WHERE key = ?1".to_string(),
-                vec![Box::new(key.to_string())],
-            )
-        };
-
-        let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            let token_bytes: Vec<u8> = row.get(0)?;
-            let token_id_bytes: Vec<u8> = row.get(1)?;
-            let value: String = row.get(2)?;
-            Ok((
-                blob_to_felt(&token_bytes),
-                blob_to_u256(&token_id_bytes),
-                value,
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
 }
 
 #[async_trait::async_trait]
 impl TokenUriStore for Erc721Storage {
-    async fn store_token_uri(&self, result: &TokenUriResult) -> anyhow::Result<()> {
-        self.upsert_token_uri(
-            result.contract,
-            result.token_id,
-            result.uri.as_deref(),
-            result.metadata_json.as_deref(),
-        )
+    async fn store_token_uri(&self, result: &TokenUriResult) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let token_blob = felt_to_blob(result.contract);
+        let token_id_blob = u256_to_blob(result.token_id);
+
+        tx.execute(
+            "INSERT INTO token_uris (token, token_id, uri, metadata_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))
+             ON CONFLICT(token, token_id) DO UPDATE SET
+                uri = excluded.uri,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at",
+            params![
+                &token_blob,
+                &token_id_blob,
+                result.uri.as_deref(),
+                result.metadata_json.as_deref()
+            ],
+        )?;
+
+        tx.execute(
+            "DELETE FROM token_attributes WHERE token = ?1 AND token_id = ?2",
+            params![&token_blob, &token_id_blob],
+        )?;
+
+        if let Some(metadata_json) = &result.metadata_json {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) {
+                if let Some(attrs) = value.get("attributes").and_then(|a| a.as_array()) {
+                    let mut attr_stmt = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO token_attributes (token, token_id, key, value)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )?;
+
+                    for attr in attrs {
+                        let key = attr
+                            .get("trait_type")
+                            .or_else(|| attr.get("key"))
+                            .and_then(|v| v.as_str());
+                        let value = attr.get("value").and_then(|v| {
+                            v.as_str().map(ToOwned::to_owned).or_else(|| {
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.to_string())
+                                }
+                            })
+                        });
+
+                        if let (Some(key), Some(value)) = (key, value) {
+                            attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
+                        }
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 }

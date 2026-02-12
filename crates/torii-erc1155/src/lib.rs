@@ -53,10 +53,11 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc1155_descrip
 
 // Re-export main types for convenience
 pub use balance_fetcher::{Erc1155BalanceFetchRequest, Erc1155BalanceFetcher};
-pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle};
+pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle, UriUpdate};
 pub use grpc_service::Erc1155Service;
 pub use identification::Erc1155Rule;
 pub use sink::Erc1155Sink;
 pub use storage::{
-    Erc1155BalanceAdjustment, Erc1155BalanceData, Erc1155Storage, TokenTransferData, TransferCursor,
+    Erc1155BalanceAdjustment, Erc1155BalanceData, Erc1155Storage, TokenTransferData, TokenUriData,
+    TransferCursor,
 };

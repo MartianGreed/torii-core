@@ -227,6 +227,12 @@ pub struct GetTokenMetadataRequest {
     /// Token contract address (32 bytes). If empty, returns all tokens.
     #[prost(bytes = "vec", optional, tag = "1")]
     pub token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Cursor token (exclusive). Only used when token is not set.
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Maximum number of entries to return (default: 100, max: 1000).
+    #[prost(uint32, tag = "3")]
+    pub limit: u32,
 }
 /// Token metadata entry
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -250,6 +256,9 @@ pub struct GetTokenMetadataResponse {
     /// Token metadata entries
     #[prost(message, repeated, tag = "1")]
     pub tokens: ::prost::alloc::vec::Vec<TokenMetadataEntry>,
+    /// Cursor for next page (absent if no more results).
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub next_cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Request for GetStats RPC
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]

@@ -899,6 +899,86 @@ impl Erc20Storage {
         Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
     }
 
+    /// Get balances with optional token/wallet filters and cursor pagination.
+    ///
+    /// Pagination is cursor-based on the `balances.id` primary key in ascending order.
+    /// Returns `(rows, next_cursor)`.
+    pub fn get_balances_filtered(
+        &self,
+        token: Option<Felt>,
+        wallet: Option<Felt>,
+        cursor: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<BalanceData>, Option<i64>)> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut query = String::from(
+            "SELECT id, token, wallet, balance, last_block, last_tx_hash
+             FROM balances
+             WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(token_addr) = token {
+            query.push_str(" AND token = ?");
+            params_vec.push(Box::new(felt_to_blob(token_addr)));
+        }
+
+        if let Some(wallet_addr) = wallet {
+            query.push_str(" AND wallet = ?");
+            params_vec.push(Box::new(felt_to_blob(wallet_addr)));
+        }
+
+        if let Some(c) = cursor {
+            query.push_str(" AND id > ?");
+            params_vec.push(Box::new(c));
+        }
+
+        query.push_str(" ORDER BY id ASC LIMIT ?");
+        params_vec.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&query)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
+
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let token_bytes: Vec<u8> = row.get(1)?;
+            let wallet_bytes: Vec<u8> = row.get(2)?;
+            let balance_bytes: Vec<u8> = row.get(3)?;
+            let last_block: i64 = row.get(4)?;
+            let last_tx_hash_bytes: Vec<u8> = row.get(5)?;
+
+            Ok((
+                id,
+                BalanceData {
+                    token: blob_to_felt(&token_bytes),
+                    wallet: blob_to_felt(&wallet_bytes),
+                    balance: blob_to_u256(&balance_bytes),
+                    last_block: last_block as u64,
+                    last_tx_hash: blob_to_felt(&last_tx_hash_bytes),
+                },
+            ))
+        })?;
+
+        let mut out: Vec<BalanceData> = Vec::new();
+        let mut last_id: Option<i64> = None;
+
+        for row in rows {
+            let (id, data) = row?;
+            last_id = Some(id);
+            out.push(data);
+        }
+
+        let next_cursor = if out.len() == limit as usize {
+            last_id
+        } else {
+            None
+        };
+
+        Ok((out, next_cursor))
+    }
+
     /// Get balances for multiple wallet/token pairs in a single query
     pub fn get_balances_batch(
         &self,
@@ -1315,5 +1395,72 @@ impl Erc20Storage {
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get token metadata with cursor-based pagination.
+    ///
+    /// Returns at most `limit` rows and an optional next cursor token.
+    pub fn get_token_metadata_paginated(
+        &self,
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(Vec<(Felt, Option<String>, Option<String>, Option<u8>)>, Option<Felt>)> {
+        let conn = self.conn.lock().unwrap();
+        let fetch_limit = limit.max(1).min(1000) as usize + 1;
+
+        let mut out = if let Some(cursor_token) = cursor {
+            let cursor_blob = felt_to_blob(cursor_token);
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, decimals
+                 FROM token_metadata
+                 WHERE token > ?1
+                 ORDER BY token ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![&cursor_blob, fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let decimals: Option<i64> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    decimals.map(|d| d as u8),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, decimals
+                 FROM token_metadata
+                 ORDER BY token ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let decimals: Option<i64> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    decimals.map(|d| d as u8),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let capped = limit.max(1).min(1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
+        };
+
+        Ok((out, next_cursor))
     }
 }
