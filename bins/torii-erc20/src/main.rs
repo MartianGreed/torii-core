@@ -97,12 +97,10 @@ async fn main() -> Result<()> {
         from_block: config.from_block,
         to_block: config.to_block,
         batch_size: 50,
-        max_inflight_batches: 2,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 
     let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
-    tracing::info!("  Max in-flight batches: {}", 2);
     tracing::info!("Extractor configured");
 
     // Create decoder

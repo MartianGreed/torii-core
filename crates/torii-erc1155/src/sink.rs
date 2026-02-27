@@ -410,13 +410,11 @@ impl Sink for Erc1155Sink {
                     .await
                 {
                     Ok(false) => {
-                        sender
-                            .request_update(TokenUriRequest {
-                                contract: transfer.token,
-                                token_id: transfer.token_id,
-                                standard: TokenStandard::Erc1155,
-                            })
-                            .await;
+                        sender.request_update(TokenUriRequest {
+                            contract: transfer.token,
+                            token_id: transfer.token_id,
+                            standard: TokenStandard::Erc1155,
+                        });
                     }
                     Ok(true) => {}
                     Err(e) => {

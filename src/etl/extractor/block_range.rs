@@ -8,10 +8,9 @@ use async_trait::async_trait;
 use starknet::core::types::MaybePreConfirmedBlockWithReceipts;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderResponseData};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::task::JoinHandle;
 
 use crate::etl::engine_db::EngineDb;
 use crate::etl::extractor::starknet_helpers::{
@@ -38,12 +37,6 @@ pub struct BlockRangeConfig {
     /// Number of blocks to fetch per batch (max efficiency: ~100-1000 depending on RPC)
     pub batch_size: u64,
 
-    /// Maximum number of in-flight batches.
-    ///
-    /// Values > 1 enable extractor-side prefetch, overlapping next-batch fetch/decode
-    /// with current-batch sink processing.
-    pub max_inflight_batches: usize,
-
     /// Retry policy for network failures
     pub retry_policy: RetryPolicy,
 }
@@ -55,7 +48,6 @@ impl Default for BlockRangeConfig {
             from_block: 0,
             to_block: None,
             batch_size: 100,
-            max_inflight_batches: 1,
             retry_policy: RetryPolicy::default(),
         }
     }
@@ -63,7 +55,6 @@ impl Default for BlockRangeConfig {
 
 #[derive(Debug)]
 struct PreparedBatch {
-    from_block: u64,
     next_block: u64,
     batch: ExtractionBatch,
 }
@@ -98,15 +89,6 @@ pub struct BlockRangeExtractor {
 
     /// Whether we've reached the configured end block.
     reached_end: bool,
-
-    /// Prefetched batch preparation tasks, ordered by scheduled start block.
-    prefetch_tasks: VecDeque<JoinHandle<Result<PreparedBatch>>>,
-
-    /// Next block number to schedule for preparation.
-    next_schedule_block: u64,
-
-    /// Last observed chain head from prepared batches.
-    last_chain_head: Option<u64>,
 }
 
 impl BlockRangeExtractor {
@@ -126,9 +108,6 @@ impl BlockRangeExtractor {
             config,
             current_block: 0,
             reached_end: false,
-            prefetch_tasks: VecDeque::new(),
-            next_schedule_block: 0,
-            last_chain_head: None,
         }
     }
 
@@ -176,67 +155,7 @@ impl BlockRangeExtractor {
             }
         }
 
-        self.next_schedule_block = self.current_block;
-        self.last_chain_head = None;
-        self.abort_prefetch_tasks();
-
         Ok(())
-    }
-
-    fn max_inflight_batches(&self) -> usize {
-        self.config.max_inflight_batches.max(1)
-    }
-
-    fn can_schedule_from(&self, from_block: u64) -> bool {
-        if let Some(to_block) = self.config.to_block {
-            return from_block <= to_block;
-        }
-
-        // Follow-chain mode: avoid overscheduling far beyond the latest known head.
-        // Allow at most one probe batch just past the head (`head + 1`).
-        match self.last_chain_head {
-            Some(chain_head) => from_block <= chain_head.saturating_add(1),
-            None => true,
-        }
-    }
-
-    fn planned_next_start(&self, from_block: u64) -> u64 {
-        let planned_end = if let Some(to_block) = self.config.to_block {
-            (from_block + self.config.batch_size - 1).min(to_block)
-        } else {
-            from_block + self.config.batch_size - 1
-        };
-        planned_end.saturating_add(1)
-    }
-
-    fn schedule_prefetch_task(&mut self, from_block: u64) {
-        let provider = self.provider.clone();
-        let config = self.config.clone();
-        tracing::debug!(
-            target: "torii::etl::block_range",
-            from_block,
-            queue_len = self.prefetch_tasks.len() + 1,
-            "Scheduling prefetched block-range"
-        );
-        self.prefetch_tasks.push_back(tokio::spawn(async move {
-            BlockRangeExtractor::prepare_batch_for(provider, config, from_block).await
-        }));
-    }
-
-    fn refill_prefetch_tasks(&mut self) {
-        while self.prefetch_tasks.len() < self.max_inflight_batches()
-            && self.can_schedule_from(self.next_schedule_block)
-        {
-            let from_block = self.next_schedule_block;
-            self.schedule_prefetch_task(from_block);
-            self.next_schedule_block = self.planned_next_start(from_block);
-        }
-    }
-
-    fn abort_prefetch_tasks(&mut self) {
-        for task in self.prefetch_tasks.drain(..) {
-            task.abort();
-        }
     }
 
     /// Fetches a batch of blocks with receipts using JSON-RPC batch requests.
@@ -320,7 +239,6 @@ impl BlockRangeExtractor {
                 chain_head: Some(chain_head),
             };
             return Ok(PreparedBatch {
-                from_block: current_block,
                 next_block: current_block,
                 batch,
             });
@@ -398,7 +316,6 @@ impl BlockRangeExtractor {
         };
 
         Ok(PreparedBatch {
-            from_block: current_block,
             next_block: batch_end + 1,
             batch,
         })
@@ -456,53 +373,16 @@ impl Extractor for BlockRangeExtractor {
             return Ok(ExtractionBatch::empty());
         }
 
-        self.refill_prefetch_tasks();
-        if self.prefetch_tasks.is_empty() {
-            return Ok(ExtractionBatch::empty());
-        }
-
-        let prepared = self
-            .prefetch_tasks
-            .pop_front()
-            .expect("prefetch task queue checked as non-empty")
-            .await
-            .context("Block-range prefetch task failed to join")??;
-
-        if prepared.from_block != self.current_block {
-            tracing::warn!(
-                target: "torii::etl::block_range",
-                expected_from_block = self.current_block,
-                got_from_block = prepared.from_block,
-                "Prefetch ordering mismatch detected, resetting prefetch queue"
-            );
-            // Recover by dropping speculative work and restarting scheduling from
-            // the exact current block. This prevents the ETL loop from getting
-            // stuck in repeated extract errors.
-            self.abort_prefetch_tasks();
-            self.next_schedule_block = self.current_block;
-            self.refill_prefetch_tasks();
-            return Ok(ExtractionBatch::empty());
-        }
-
-        self.last_chain_head = prepared.batch.chain_head;
+        let prepared =
+            Self::prepare_batch_for(self.provider.clone(), self.config.clone(), self.current_block)
+                .await?;
         self.current_block = prepared.next_block;
 
         tracing::debug!(
             target: "torii::etl::block_range",
-            fetched_from = prepared.from_block,
             next_block = self.current_block,
-            queue_len = self.prefetch_tasks.len(),
-            "Using prefetched block-range batch"
+            "Using block-range batch"
         );
-
-        if self.config.to_block.is_none() && prepared.batch.is_empty() {
-            // Follow-chain mode: if we reached chain head, drop speculative work and
-            // restart scheduling from the same block on the next extract call.
-            self.abort_prefetch_tasks();
-            self.next_schedule_block = self.current_block;
-        } else {
-            self.refill_prefetch_tasks();
-        }
 
         Ok(prepared.batch)
     }

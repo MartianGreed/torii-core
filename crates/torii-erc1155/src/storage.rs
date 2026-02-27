@@ -1556,6 +1556,31 @@ impl Erc1155Storage {
         Ok(count > 0)
     }
 
+    /// Returns all token URI rows for a given contract.
+    pub async fn get_token_uris_by_contract(
+        &self,
+        token: Felt,
+    ) -> Result<Vec<(U256, Option<String>, Option<String>)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_uris_by_contract(token).await;
+        }
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let mut stmt = conn.prepare(
+            "SELECT token_id, uri, metadata_json
+             FROM token_uris
+             WHERE token = ?1
+             ORDER BY token_id ASC",
+        )?;
+        let rows = stmt.query_map(params![&token_blob], |row| {
+            let token_id_bytes: Vec<u8> = row.get(0)?;
+            let uri: Option<String> = row.get(1)?;
+            let metadata_json: Option<String> = row.get(2)?;
+            Ok((blob_to_u256(&token_id_bytes), uri, metadata_json))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     async fn pg_client(&self) -> Result<tokio::sync::MutexGuard<'_, Client>> {
         let conn = self
             .pg_conn
@@ -2477,6 +2502,32 @@ impl Erc1155Storage {
             )
             .await?;
         Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_get_token_uris_by_contract(
+        &self,
+        token: Felt,
+    ) -> Result<Vec<(U256, Option<String>, Option<String>)>> {
+        let client = self.pg_client().await?;
+        let rows = client
+            .query(
+                "SELECT token_id, uri, metadata_json
+                 FROM erc1155.token_uris
+                 WHERE token = $1
+                 ORDER BY token_id ASC",
+                &[&felt_to_blob(token)],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(0)),
+                    row.get(1),
+                    row.get(2),
+                )
+            })
+            .collect())
     }
 }
 

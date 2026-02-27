@@ -193,17 +193,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         ExtractionMode::BlockRange => {
             tracing::info!("Using Block Range mode (single global cursor)");
             tracing::info!("  Batch size: {} blocks", config.batch_size);
-            tracing::info!(
-                "  Max in-flight batches: {}",
-                config.rpc_max_inflight_batches
-            );
 
             let extractor_config = BlockRangeConfig {
                 rpc_url: config.rpc_url.clone(),
                 from_block: config.from_block,
                 to_block: config.to_block,
                 batch_size: config.batch_size,
-                max_inflight_batches: config.rpc_max_inflight_batches,
                 retry_policy: RetryPolicy::default(),
             };
             Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config))
@@ -415,12 +410,14 @@ async fn run_indexer(config: Config) -> Result<()> {
         let grpc_service = Erc721Service::new(storage.clone());
         let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            let metadata_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn(
-                metadata_fetcher,
+            let image_cache_dir = db_dir.join("image-cache");
+            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
+                Arc::new(MetadataFetcher::new(provider.clone())),
                 sink.storage().clone(),
                 1024, // buffer size
-                8,    // max concurrent fetches
+                8,    // max concurrent metadata fetches
+                Some(image_cache_dir),
+                8, // max concurrent image downloads
             );
             sink = sink
                 .with_metadata_fetching(provider.clone())
@@ -465,8 +462,16 @@ async fn run_indexer(config: Config) -> Result<()> {
             .with_balance_tracking(provider.clone());
         if effective_metadata_mode == MetadataMode::Inline {
             let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
+            let image_cache_dir = db_dir.join("image-cache");
             let (erc1155_uri_sender, _erc1155_uri_service) =
-                TokenUriService::spawn(erc1155_fetcher, sink.storage().clone(), 1024, 8);
+                TokenUriService::spawn_with_image_cache(
+                    erc1155_fetcher,
+                    sink.storage().clone(),
+                    1024,
+                    8,
+                    Some(image_cache_dir),
+                    8,
+                );
             sink = sink.with_token_uri_sender(erc1155_uri_sender);
         } else {
             tracing::info!("ERC1155 metadata fetching disabled for throughput (deferred mode)");

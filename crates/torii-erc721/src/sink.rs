@@ -242,13 +242,11 @@ impl Sink for Erc721Sink {
                     .downcast_ref::<DecodedMetadataUpdate>()
                 {
                     if let Some(ref sender) = self.token_uri_sender {
-                        sender
-                            .request_update(TokenUriRequest {
-                                contract: update.token,
-                                token_id: update.token_id,
-                                standard: TokenStandard::Erc721,
-                            })
-                            .await;
+                        sender.request_update(TokenUriRequest {
+                            contract: update.token,
+                            token_id: update.token_id,
+                            standard: TokenStandard::Erc721,
+                        });
                     }
                 }
             }
@@ -269,13 +267,11 @@ impl Sink for Erc721Sink {
                                 if *token_id >= update.from_token_id
                                     && *token_id <= update.to_token_id
                                 {
-                                    sender
-                                        .request_update(TokenUriRequest {
-                                            contract: update.token,
-                                            token_id: *token_id,
-                                            standard: TokenStandard::Erc721,
-                                        })
-                                        .await;
+                                    sender.request_update(TokenUriRequest {
+                                        contract: update.token,
+                                        token_id: *token_id,
+                                        standard: TokenStandard::Erc721,
+                                    });
                                 }
                             }
                         }
@@ -362,13 +358,11 @@ impl Sink for Erc721Sink {
                     .await
                 {
                     Ok(false) => {
-                        sender
-                            .request_update(TokenUriRequest {
-                                contract: transfer.token,
-                                token_id: transfer.token_id,
-                                standard: TokenStandard::Erc721,
-                            })
-                            .await;
+                        sender.request_update(TokenUriRequest {
+                            contract: transfer.token,
+                            token_id: transfer.token_id,
+                            standard: TokenStandard::Erc721,
+                        });
                     }
                     Ok(true) => {}
                     Err(e) => {

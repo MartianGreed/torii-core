@@ -19,6 +19,7 @@
 
 use starknet::core::types::{Felt, U256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -30,6 +31,7 @@ use crate::MetadataFetcher;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RETRIES: u32 = 5;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Token standard hint for URI fetching
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,25 +85,32 @@ pub struct TokenUriSender {
 
 impl TokenUriSender {
     /// Queue a token URI fetch request.
-    pub async fn request_update(&self, request: TokenUriRequest) {
-        if let Err(e) = self.tx.send(request).await {
-            tracing::warn!(
-                target: "torii_common::token_uri",
-                error = %e,
-                "Failed to send token URI request (channel closed)"
-            );
+    pub fn request_update(&self, request: TokenUriRequest) {
+        match self.tx.try_send(request) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    target: "torii_common::token_uri",
+                    "Dropping token URI request: queue is full"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    target: "torii_common::token_uri",
+                    "Failed to send token URI request (channel closed)"
+                );
+            }
         }
     }
 
     /// Queue updates for a batch of token IDs on the same contract.
-    pub async fn request_batch(&self, contract: Felt, token_ids: &[U256], standard: TokenStandard) {
+    pub fn request_batch(&self, contract: Felt, token_ids: &[U256], standard: TokenStandard) {
         for &token_id in token_ids {
             self.request_update(TokenUriRequest {
                 contract,
                 token_id,
                 standard,
-            })
-            .await;
+            });
         }
     }
 }
@@ -109,6 +118,12 @@ impl TokenUriSender {
 /// The background service that processes token URI fetch requests.
 pub struct TokenUriService {
     handle: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ImageCacheConfig {
+    dir: PathBuf,
+    max_concurrent: usize,
 }
 
 impl TokenUriService {
@@ -122,8 +137,27 @@ impl TokenUriService {
         buffer_size: usize,
         max_concurrent: usize,
     ) -> (TokenUriSender, Self) {
+        Self::spawn_with_image_cache(fetcher, store, buffer_size, max_concurrent, None, 4)
+    }
+
+    /// Spawn the token URI service with optional local image caching.
+    ///
+    /// When `image_cache_dir` is set, image URLs from metadata are downloaded in
+    /// background tasks and saved under that directory.
+    pub fn spawn_with_image_cache<S: TokenUriStore>(
+        fetcher: Arc<MetadataFetcher>,
+        store: Arc<S>,
+        buffer_size: usize,
+        max_concurrent: usize,
+        image_cache_dir: Option<PathBuf>,
+        image_max_concurrent: usize,
+    ) -> (TokenUriSender, Self) {
         let (tx, rx) = mpsc::channel(buffer_size);
-        let handle = tokio::spawn(Self::run(rx, fetcher, store, max_concurrent));
+        let image_cache = image_cache_dir.map(|dir| ImageCacheConfig {
+            dir,
+            max_concurrent: image_max_concurrent.max(1),
+        });
+        let handle = tokio::spawn(Self::run(rx, fetcher, store, max_concurrent, image_cache));
         let sender = TokenUriSender { tx };
         (sender, Self { handle })
     }
@@ -134,10 +168,14 @@ impl TokenUriService {
         fetcher: Arc<MetadataFetcher>,
         store: Arc<S>,
         max_concurrent: usize,
+        image_cache: Option<ImageCacheConfig>,
     ) {
         let in_flight: Arc<Mutex<HashMap<TaskKey, JoinHandle<()>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let image_semaphore = image_cache
+            .as_ref()
+            .map(|cfg| Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent)));
 
         while let Some(request) = rx.recv().await {
             let key = TaskKey {
@@ -163,6 +201,8 @@ impl TokenUriService {
             let in_flight = in_flight.clone();
             let sem = semaphore.clone();
             let task_key = key.clone();
+            let image_cache = image_cache.clone();
+            let image_semaphore = image_semaphore.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = match sem.acquire().await {
@@ -226,6 +266,35 @@ impl TokenUriService {
                     );
                 }
 
+                if let (Some(cfg), Some(meta)) =
+                    (image_cache.clone(), result.metadata_json.as_ref())
+                {
+                    if let Some(image_uri) = extract_image_uri(meta) {
+                        let image_semaphore = image_semaphore.clone();
+                        let contract = request.contract;
+                        let token_id = request.token_id;
+                        tokio::spawn(async move {
+                            let _permit = match image_semaphore {
+                                Some(sema) => sema.acquire_owned().await.ok(),
+                                None => None,
+                            };
+
+                            if let Err(e) =
+                                cache_image_locally(&cfg.dir, contract, token_id, &image_uri).await
+                            {
+                                tracing::debug!(
+                                    target: "torii_common::token_uri",
+                                    contract = %format!("{:#x}", contract),
+                                    token_id = %token_id,
+                                    image_uri = %image_uri,
+                                    error = %e,
+                                    "Failed to cache image locally"
+                                );
+                            }
+                        });
+                    }
+                }
+
                 in_flight.lock().await.remove(&task_key);
             });
 
@@ -247,6 +316,168 @@ impl TokenUriService {
     pub fn abort(self) {
         self.handle.abort();
     }
+}
+
+fn extract_image_uri(metadata_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
+    for key in ["image", "image_url", "imageUrl"] {
+        if let Some(v) = value.get(key).and_then(|v| v.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    if let Some(props) = value.get("properties") {
+        for key in ["image", "image_url", "imageUrl"] {
+            if let Some(v) = props.get(key).and_then(|v| v.as_str()) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn cache_image_locally(
+    root_dir: &PathBuf,
+    contract: Felt,
+    token_id: U256,
+    image_uri: &str,
+) -> anyhow::Result<PathBuf> {
+    let (bytes, content_type, source_url) = fetch_image_bytes_with_retry(image_uri)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("image download failed"))?;
+
+    let contract_dir = format!("{:#x}", contract)
+        .trim_start_matches("0x")
+        .to_owned();
+    let token_name = format!("{token_id:064x}");
+    let ext = image_extension(content_type.as_deref(), &source_url);
+
+    let dir = root_dir.join(contract_dir);
+    tokio::fs::create_dir_all(&dir).await?;
+    let final_path = dir.join(format!("{token_name}.{ext}"));
+    if tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
+        return Ok(final_path);
+    }
+
+    let tmp_path = dir.join(format!("{token_name}.{ext}.tmp"));
+    tokio::fs::write(&tmp_path, bytes).await?;
+    tokio::fs::rename(&tmp_path, &final_path).await?;
+
+    tracing::debug!(
+        target: "torii_common::token_uri",
+        contract = %format!("{:#x}", contract),
+        token_id = %token_id,
+        path = %final_path.display(),
+        "Cached image locally"
+    );
+    Ok(final_path)
+}
+
+async fn fetch_image_bytes_with_retry(uri: &str) -> Option<(Vec<u8>, Option<String>, String)> {
+    if uri.starts_with("data:") {
+        let (bytes, content_type) = resolve_data_uri_bytes(uri)?;
+        return Some((bytes, content_type, uri.to_owned()));
+    }
+
+    let url = if let Some(cid) = uri.strip_prefix("ipfs://") {
+        format!("https://ipfs.io/ipfs/{cid}")
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+        uri.to_owned()
+    } else {
+        return None;
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(IMAGE_FETCH_TIMEOUT)
+        .build()
+        .ok()?;
+
+    let mut retries = 0;
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    return None;
+                }
+                let content_type = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_owned());
+                let bytes = resp.bytes().await.ok()?.to_vec();
+                return Some((bytes, content_type, url));
+            }
+            Err(_) if retries < MAX_RETRIES => {
+                tokio::time::sleep(backoff).await;
+                retries += 1;
+                backoff *= 2;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn resolve_data_uri_bytes(uri: &str) -> Option<(Vec<u8>, Option<String>)> {
+    let uri = uri.replace('#', "%23");
+    let comma_pos = uri.find(',')?;
+    let header = &uri[5..comma_pos];
+    let body = &uri[comma_pos + 1..];
+
+    let mut parts = header.split(';');
+    let media_type = parts.next().unwrap_or_default().trim();
+    let is_base64 = parts.any(|p| p.eq_ignore_ascii_case("base64"));
+
+    let bytes = if is_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .ok()?
+    } else {
+        urlencoding::decode(body).ok()?.as_bytes().to_vec()
+    };
+
+    let content_type = if media_type.is_empty() {
+        None
+    } else {
+        Some(media_type.to_owned())
+    };
+    Some((bytes, content_type))
+}
+
+fn image_extension(content_type: Option<&str>, source_url: &str) -> &'static str {
+    if let Some(ct) = content_type {
+        let main = ct.split(';').next().unwrap_or_default().trim();
+        return match main {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            "image/svg+xml" => "svg",
+            "image/avif" => "avif",
+            _ => "bin",
+        };
+    }
+
+    let path = source_url.split('?').next().unwrap_or(source_url);
+    if let Some(ext) = path.rsplit('.').next() {
+        let ext = ext.to_ascii_lowercase();
+        return match ext.as_str() {
+            "png" => "png",
+            "jpg" | "jpeg" => "jpg",
+            "webp" => "webp",
+            "gif" => "gif",
+            "svg" => "svg",
+            "avif" => "avif",
+            _ => "bin",
+        };
+    }
+    "bin"
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

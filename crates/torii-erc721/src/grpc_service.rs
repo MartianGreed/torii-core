@@ -1,22 +1,28 @@
 //! gRPC service implementation for ERC721 queries and subscriptions
 
 use crate::proto::{
-    erc721_server::Erc721 as Erc721Trait, AttributeFacetCount, Cursor, GetOwnerRequest,
+    erc721_server::Erc721 as Erc721Trait, AttributeFacetCount, CollectionToken,
+    ContractCollectionOverview, Cursor, GetCollectionOverviewRequest,
+    GetCollectionOverviewResponse, GetCollectionTokensRequest, GetCollectionTokensResponse,
+    GetCollectionTraitFacetsRequest, GetCollectionTraitFacetsResponse, GetOwnerRequest,
     GetOwnerResponse, GetOwnershipRequest, GetOwnershipResponse, GetStatsRequest, GetStatsResponse,
     GetTokenMetadataRequest, GetTokenMetadataResponse, GetTransfersRequest, GetTransfersResponse,
     NftTransfer, Ownership, QueryTokensByAttributesRequest, QueryTokensByAttributesResponse,
-    SubscribeTransfersRequest, TokenMetadataEntry, TransferFilter, TransferUpdate,
+    SubscribeTransfersRequest, TokenMetadataEntry, TraitSummary, TransferFilter, TransferUpdate,
 };
 use crate::storage::{Erc721Storage, NftTransferData, TransferCursor};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use starknet::core::types::Felt;
 use starknet::core::types::U256;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
 use torii_common::{bytes_to_felt, bytes_to_u256, u256_to_bytes};
+
+const DEFAULT_PROJECT_ID: &str = "arcade-main";
 
 /// gRPC service implementation for ERC721
 #[derive(Clone)]
@@ -108,6 +114,130 @@ impl Erc721Service {
         }
 
         true
+    }
+
+    fn hex_without_leading_zeroes(bytes: &[u8]) -> String {
+        let mut out = hex::encode(bytes);
+        while out.starts_with('0') && out.len() > 1 {
+            out.remove(0);
+        }
+        if out.is_empty() {
+            "0".to_owned()
+        } else {
+            out
+        }
+    }
+
+    fn static_image_url(contract: Felt, token_id: U256) -> String {
+        let token_hex = Self::hex_without_leading_zeroes(&u256_to_bytes(token_id));
+        format!(
+            "https://api.cartridge.gg/x/{}/torii/static/{:#x}/0x{}/image",
+            DEFAULT_PROJECT_ID, contract, token_hex
+        )
+    }
+
+    fn build_trait_summaries(facets: &[AttributeFacetCount]) -> Vec<TraitSummary> {
+        let mut per_key: HashMap<String, HashSet<String>> = HashMap::new();
+        for facet in facets {
+            per_key
+                .entry(facet.key.clone())
+                .or_default()
+                .insert(facet.value.clone());
+        }
+
+        let mut summaries: Vec<TraitSummary> = per_key
+            .into_iter()
+            .map(|(key, values)| TraitSummary {
+                key,
+                value_count: values.len() as u64,
+            })
+            .collect();
+        summaries.sort_by(|a, b| a.key.cmp(&b.key));
+        summaries
+    }
+
+    async fn query_collection_tokens(
+        &self,
+        contract: Felt,
+        filters: &[(String, Vec<String>)],
+        cursor_token_id: Option<U256>,
+        limit: u32,
+        include_facets: bool,
+        facet_limit: u32,
+        include_images: bool,
+    ) -> Result<
+        (
+            Vec<CollectionToken>,
+            Option<Vec<u8>>,
+            u64,
+            Vec<AttributeFacetCount>,
+        ),
+        Status,
+    > {
+        let result = self
+            .storage
+            .query_token_ids_by_attributes(
+                contract,
+                filters,
+                cursor_token_id,
+                limit,
+                include_facets,
+                facet_limit,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let uri_rows = self
+            .storage
+            .get_token_uris_by_contract(contract)
+            .await
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+        let by_token_id: HashMap<Vec<u8>, (Option<String>, Option<String>)> = uri_rows
+            .into_iter()
+            .map(|(token_id, uri, metadata_json)| (u256_to_bytes(token_id), (uri, metadata_json)))
+            .collect();
+
+        let tokens = result
+            .token_ids
+            .iter()
+            .map(|token_id| {
+                let token_id_bytes = u256_to_bytes(*token_id);
+                let (uri, metadata_json) = by_token_id
+                    .get(&token_id_bytes)
+                    .cloned()
+                    .unwrap_or((None, None));
+                let image_url = if include_images {
+                    Some(Self::static_image_url(contract, *token_id))
+                } else {
+                    None
+                };
+
+                CollectionToken {
+                    contract_address: contract.to_bytes_be().to_vec(),
+                    token_id: token_id_bytes,
+                    uri,
+                    metadata_json,
+                    image_url,
+                }
+            })
+            .collect();
+
+        let facets = result
+            .facets
+            .into_iter()
+            .map(|f| AttributeFacetCount {
+                key: f.key,
+                value: f.value,
+                count: f.count,
+            })
+            .collect();
+
+        Ok((
+            tokens,
+            result.next_cursor_token_id.map(u256_to_bytes),
+            result.total_hits,
+            facets,
+        ))
     }
 }
 
@@ -356,6 +486,147 @@ impl Erc721Trait for Erc721Service {
                 })
                 .collect(),
         }))
+    }
+
+    /// Fetch collection token rows with pagination and optional facets.
+    async fn get_collection_tokens(
+        &self,
+        request: Request<GetCollectionTokensRequest>,
+    ) -> Result<Response<GetCollectionTokensResponse>, Status> {
+        let req = request.into_inner();
+        let contract = bytes_to_felt(&req.contract_address)
+            .ok_or_else(|| Status::invalid_argument("Invalid contract address"))?;
+        let cursor_token_id = req.cursor_token_id.as_ref().map(|b| bytes_to_u256(b));
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1000)
+        };
+        let facet_limit = if req.facet_limit == 0 {
+            100
+        } else {
+            req.facet_limit.min(1000)
+        };
+        let filters: Vec<(String, Vec<String>)> =
+            req.filters.into_iter().map(|f| (f.key, f.values)).collect();
+
+        let (tokens, next_cursor_token_id, total_hits, facets) = self
+            .query_collection_tokens(
+                contract,
+                &filters,
+                cursor_token_id,
+                limit,
+                req.include_facets,
+                facet_limit,
+                req.include_images,
+            )
+            .await?;
+
+        Ok(Response::new(GetCollectionTokensResponse {
+            tokens,
+            next_cursor_token_id,
+            total_hits,
+            facets,
+        }))
+    }
+
+    /// Fetch trait facets and trait summaries for a collection.
+    async fn get_collection_trait_facets(
+        &self,
+        request: Request<GetCollectionTraitFacetsRequest>,
+    ) -> Result<Response<GetCollectionTraitFacetsResponse>, Status> {
+        let req = request.into_inner();
+        let contract = bytes_to_felt(&req.contract_address)
+            .ok_or_else(|| Status::invalid_argument("Invalid contract address"))?;
+        let facet_limit = if req.facet_limit == 0 {
+            100
+        } else {
+            req.facet_limit.min(1000)
+        };
+        let filters: Vec<(String, Vec<String>)> =
+            req.filters.into_iter().map(|f| (f.key, f.values)).collect();
+
+        let (_, _, total_hits, facets) = self
+            .query_collection_tokens(contract, &filters, None, 1, true, facet_limit, false)
+            .await?;
+        let traits = Self::build_trait_summaries(&facets);
+
+        Ok(Response::new(GetCollectionTraitFacetsResponse {
+            facets,
+            traits,
+            total_hits,
+        }))
+    }
+
+    /// Fetch grouped overview blocks for one or more contracts.
+    async fn get_collection_overview(
+        &self,
+        request: Request<GetCollectionOverviewRequest>,
+    ) -> Result<Response<GetCollectionOverviewResponse>, Status> {
+        let req = request.into_inner();
+        if req.contract_addresses.is_empty() {
+            return Err(Status::invalid_argument(
+                "contract_addresses must not be empty",
+            ));
+        }
+
+        let per_contract_limit = if req.per_contract_limit == 0 {
+            50
+        } else {
+            req.per_contract_limit.min(200)
+        };
+        let facet_limit = if req.facet_limit == 0 {
+            100
+        } else {
+            req.facet_limit.min(1000)
+        };
+        let mut filter_by_contract: HashMap<Felt, Vec<(String, Vec<String>)>> = HashMap::new();
+        for cf in req.contract_filters {
+            let Some(contract) = bytes_to_felt(&cf.contract_address) else {
+                continue;
+            };
+            let filters = cf.filters.into_iter().map(|f| (f.key, f.values)).collect();
+            filter_by_contract.insert(contract, filters);
+        }
+
+        let mut contracts = Vec::new();
+        let mut seen = HashSet::new();
+        for raw in req.contract_addresses {
+            let contract = bytes_to_felt(&raw)
+                .ok_or_else(|| Status::invalid_argument("Invalid contract address"))?;
+            if seen.insert(contract) {
+                contracts.push(contract);
+            }
+        }
+
+        let mut overviews = Vec::with_capacity(contracts.len());
+        for contract in contracts {
+            let empty_filters = Vec::new();
+            let filters = filter_by_contract.get(&contract).unwrap_or(&empty_filters);
+            let (tokens, next_cursor_token_id, total_hits, facets) = self
+                .query_collection_tokens(
+                    contract,
+                    filters,
+                    None,
+                    per_contract_limit,
+                    req.include_facets,
+                    facet_limit,
+                    req.include_images,
+                )
+                .await?;
+            let traits = Self::build_trait_summaries(&facets);
+
+            overviews.push(ContractCollectionOverview {
+                contract_address: contract.to_bytes_be().to_vec(),
+                tokens,
+                next_cursor_token_id,
+                total_hits,
+                facets,
+                traits,
+            });
+        }
+
+        Ok(Response::new(GetCollectionOverviewResponse { overviews }))
     }
 
     /// Subscribe to real-time transfer events

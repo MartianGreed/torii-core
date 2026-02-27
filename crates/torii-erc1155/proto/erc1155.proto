@@ -230,6 +230,126 @@ message GetTokenMetadataResponse {
     optional bytes next_cursor = 2;
 }
 
+// ===== Collection APIs =====
+
+// Token row returned by collection endpoints
+message CollectionToken {
+    // Token contract address (32 bytes)
+    bytes contract_address = 1;
+    // Token ID as U256 bytes
+    bytes token_id = 2;
+    // On-chain token URI (if known)
+    optional string uri = 3;
+    // Raw metadata JSON (if cached)
+    optional string metadata_json = 4;
+    // Resolved static image URL (if requested)
+    optional string image_url = 5;
+}
+
+// Summary for one trait key
+message TraitSummary {
+    // Attribute key / trait_type
+    string key = 1;
+    // Number of distinct values for this key
+    uint64 value_count = 2;
+}
+
+// Request for GetCollectionTokens RPC
+message GetCollectionTokensRequest {
+    // Token contract address (required)
+    bytes contract_address = 1;
+    // Attribute filters (AND across entries)
+    repeated AttributeFilter filters = 2;
+    // Cursor token_id (exclusive) for pagination
+    optional bytes cursor_token_id = 3;
+    // Maximum number of token IDs to return (default: 100, max: 1000)
+    uint32 limit = 4;
+    // Include facet counts in response
+    bool include_facets = 5;
+    // Maximum number of facet rows to return (default: 100, max: 1000)
+    uint32 facet_limit = 6;
+    // Include image URLs in each token row
+    bool include_images = 7;
+}
+
+// Response for GetCollectionTokens RPC
+message GetCollectionTokensResponse {
+    // Token rows for the collection page
+    repeated CollectionToken tokens = 1;
+    // Cursor for next page (absent if no more results)
+    optional bytes next_cursor_token_id = 2;
+    // Total number of matched token IDs (without pagination)
+    uint64 total_hits = 3;
+    // Facet counts over the matched set
+    repeated AttributeFacetCount facets = 4;
+}
+
+// Request for GetCollectionTraitFacets RPC
+message GetCollectionTraitFacetsRequest {
+    // Token contract address (required)
+    bytes contract_address = 1;
+    // Attribute filters (AND across entries)
+    repeated AttributeFilter filters = 2;
+    // Maximum number of facet rows to return (default: 100, max: 1000)
+    uint32 facet_limit = 3;
+}
+
+// Response for GetCollectionTraitFacets RPC
+message GetCollectionTraitFacetsResponse {
+    // Facet counts over the matched set
+    repeated AttributeFacetCount facets = 1;
+    // Summary rows grouped by key
+    repeated TraitSummary traits = 2;
+    // Total number of matched token IDs (without pagination)
+    uint64 total_hits = 3;
+}
+
+// Optional per-contract filters for overview endpoint
+message ContractAttributeFilters {
+    // Token contract address
+    bytes contract_address = 1;
+    // Filters applied to this contract only
+    repeated AttributeFilter filters = 2;
+}
+
+// Grouped overview block for one contract
+message ContractCollectionOverview {
+    // Token contract address
+    bytes contract_address = 1;
+    // Token rows for this contract
+    repeated CollectionToken tokens = 2;
+    // Cursor for next page (absent if no more results)
+    optional bytes next_cursor_token_id = 3;
+    // Total number of matched token IDs (without pagination)
+    uint64 total_hits = 4;
+    // Facet counts over matched set
+    repeated AttributeFacetCount facets = 5;
+    // Summary rows grouped by key
+    repeated TraitSummary traits = 6;
+}
+
+// Request for GetCollectionOverview RPC
+message GetCollectionOverviewRequest {
+    // One or more contracts to query
+    repeated bytes contract_addresses = 1;
+    // Maximum tokens per contract block (default: 50, max: 200)
+    uint32 per_contract_limit = 2;
+    // Include facet counts per contract
+    bool include_facets = 3;
+    // Maximum number of facet rows per contract (default: 100, max: 1000)
+    uint32 facet_limit = 4;
+    // Include image URLs in token rows
+    bool include_images = 5;
+    // Optional contract-specific filters
+    repeated ContractAttributeFilters contract_filters = 7;
+}
+
+// Response for GetCollectionOverview RPC
+message GetCollectionOverviewResponse {
+    // One overview block per requested contract
+    repeated ContractCollectionOverview overviews = 1;
+}
+
 // ===== Stats =====
 
 // Request for GetStats RPC
@@ -262,6 +382,15 @@ service Erc1155 {
 
     // Query token IDs by flattened metadata attributes (supports intersections)
     rpc QueryTokensByAttributes(QueryTokensByAttributesRequest) returns (QueryTokensByAttributesResponse);
+
+    // Fetch collection token rows with pagination and optional facets
+    rpc GetCollectionTokens(GetCollectionTokensRequest) returns (GetCollectionTokensResponse);
+
+    // Fetch trait facets and trait summaries for a collection
+    rpc GetCollectionTraitFacets(GetCollectionTraitFacetsRequest) returns (GetCollectionTraitFacetsResponse);
+
+    // Fetch grouped overview blocks for one or more contracts
+    rpc GetCollectionOverview(GetCollectionOverviewRequest) returns (GetCollectionOverviewResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);

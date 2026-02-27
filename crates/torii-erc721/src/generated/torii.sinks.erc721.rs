@@ -321,6 +321,163 @@ pub struct GetTokenMetadataResponse {
     #[prost(bytes = "vec", optional, tag = "2")]
     pub next_cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+/// Token row returned by collection endpoints
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CollectionToken {
+    /// Token contract address (32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_address: ::prost::alloc::vec::Vec<u8>,
+    /// Token ID as U256 bytes
+    #[prost(bytes = "vec", tag = "2")]
+    pub token_id: ::prost::alloc::vec::Vec<u8>,
+    /// On-chain token URI (if known)
+    #[prost(string, optional, tag = "3")]
+    pub uri: ::core::option::Option<::prost::alloc::string::String>,
+    /// Raw metadata JSON (if cached)
+    #[prost(string, optional, tag = "4")]
+    pub metadata_json: ::core::option::Option<::prost::alloc::string::String>,
+    /// Resolved static image URL (if requested)
+    #[prost(string, optional, tag = "5")]
+    pub image_url: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Summary for one trait key
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TraitSummary {
+    /// Attribute key / trait_type
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    /// Number of distinct values for this key
+    #[prost(uint64, tag = "2")]
+    pub value_count: u64,
+}
+/// Request for GetCollectionTokens RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionTokensRequest {
+    /// Token contract address (required)
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_address: ::prost::alloc::vec::Vec<u8>,
+    /// Attribute filters (AND across entries)
+    #[prost(message, repeated, tag = "2")]
+    pub filters: ::prost::alloc::vec::Vec<AttributeFilter>,
+    /// Cursor token_id (exclusive) for pagination
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub cursor_token_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Maximum number of token IDs to return (default: 100, max: 1000)
+    #[prost(uint32, tag = "4")]
+    pub limit: u32,
+    /// Include facet counts in response
+    #[prost(bool, tag = "5")]
+    pub include_facets: bool,
+    /// Maximum number of facet rows to return (default: 100, max: 1000)
+    #[prost(uint32, tag = "6")]
+    pub facet_limit: u32,
+    /// Include image URLs in each token row
+    #[prost(bool, tag = "7")]
+    pub include_images: bool,
+}
+/// Response for GetCollectionTokens RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionTokensResponse {
+    /// Token rows for the collection page
+    #[prost(message, repeated, tag = "1")]
+    pub tokens: ::prost::alloc::vec::Vec<CollectionToken>,
+    /// Cursor for next page (absent if no more results)
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub next_cursor_token_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Total number of matched token IDs (without pagination)
+    #[prost(uint64, tag = "3")]
+    pub total_hits: u64,
+    /// Facet counts over the matched set
+    #[prost(message, repeated, tag = "4")]
+    pub facets: ::prost::alloc::vec::Vec<AttributeFacetCount>,
+}
+/// Request for GetCollectionTraitFacets RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionTraitFacetsRequest {
+    /// Token contract address (required)
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_address: ::prost::alloc::vec::Vec<u8>,
+    /// Attribute filters (AND across entries)
+    #[prost(message, repeated, tag = "2")]
+    pub filters: ::prost::alloc::vec::Vec<AttributeFilter>,
+    /// Maximum number of facet rows to return (default: 100, max: 1000)
+    #[prost(uint32, tag = "3")]
+    pub facet_limit: u32,
+}
+/// Response for GetCollectionTraitFacets RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionTraitFacetsResponse {
+    /// Facet counts over the matched set
+    #[prost(message, repeated, tag = "1")]
+    pub facets: ::prost::alloc::vec::Vec<AttributeFacetCount>,
+    /// Summary rows grouped by key
+    #[prost(message, repeated, tag = "2")]
+    pub traits: ::prost::alloc::vec::Vec<TraitSummary>,
+    /// Total number of matched token IDs (without pagination)
+    #[prost(uint64, tag = "3")]
+    pub total_hits: u64,
+}
+/// Optional per-contract filters for overview endpoint
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContractAttributeFilters {
+    /// Token contract address
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_address: ::prost::alloc::vec::Vec<u8>,
+    /// Filters applied to this contract only
+    #[prost(message, repeated, tag = "2")]
+    pub filters: ::prost::alloc::vec::Vec<AttributeFilter>,
+}
+/// Grouped overview block for one contract
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ContractCollectionOverview {
+    /// Token contract address
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_address: ::prost::alloc::vec::Vec<u8>,
+    /// Token rows for this contract
+    #[prost(message, repeated, tag = "2")]
+    pub tokens: ::prost::alloc::vec::Vec<CollectionToken>,
+    /// Cursor for next page (absent if no more results)
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub next_cursor_token_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Total number of matched token IDs (without pagination)
+    #[prost(uint64, tag = "4")]
+    pub total_hits: u64,
+    /// Facet counts over matched set
+    #[prost(message, repeated, tag = "5")]
+    pub facets: ::prost::alloc::vec::Vec<AttributeFacetCount>,
+    /// Summary rows grouped by key
+    #[prost(message, repeated, tag = "6")]
+    pub traits: ::prost::alloc::vec::Vec<TraitSummary>,
+}
+/// Request for GetCollectionOverview RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionOverviewRequest {
+    /// One or more contracts to query
+    #[prost(bytes = "vec", repeated, tag = "1")]
+    pub contract_addresses: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Maximum tokens per contract block (default: 50, max: 200)
+    #[prost(uint32, tag = "2")]
+    pub per_contract_limit: u32,
+    /// Include facet counts per contract
+    #[prost(bool, tag = "3")]
+    pub include_facets: bool,
+    /// Maximum number of facet rows per contract (default: 100, max: 1000)
+    #[prost(uint32, tag = "4")]
+    pub facet_limit: u32,
+    /// Include image URLs in token rows
+    #[prost(bool, tag = "5")]
+    pub include_images: bool,
+    /// Optional contract-specific filters
+    #[prost(message, repeated, tag = "7")]
+    pub contract_filters: ::prost::alloc::vec::Vec<ContractAttributeFilters>,
+}
+/// Response for GetCollectionOverview RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCollectionOverviewResponse {
+    /// One overview block per requested contract
+    #[prost(message, repeated, tag = "1")]
+    pub overviews: ::prost::alloc::vec::Vec<ContractCollectionOverview>,
+}
 /// Request for GetStats RPC
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct GetStatsRequest {}
@@ -391,6 +548,30 @@ pub mod erc721_server {
             request: tonic::Request<super::QueryTokensByAttributesRequest>,
         ) -> std::result::Result<
             tonic::Response<super::QueryTokensByAttributesResponse>,
+            tonic::Status,
+        >;
+        /// Fetch collection token rows with pagination and optional facets
+        async fn get_collection_tokens(
+            &self,
+            request: tonic::Request<super::GetCollectionTokensRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCollectionTokensResponse>,
+            tonic::Status,
+        >;
+        /// Fetch trait facets and trait summaries for a collection
+        async fn get_collection_trait_facets(
+            &self,
+            request: tonic::Request<super::GetCollectionTraitFacetsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCollectionTraitFacetsResponse>,
+            tonic::Status,
+        >;
+        /// Fetch grouped overview blocks for one or more contracts
+        async fn get_collection_overview(
+            &self,
+            request: tonic::Request<super::GetCollectionOverviewRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCollectionOverviewResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the SubscribeTransfers method.
@@ -704,6 +885,145 @@ pub mod erc721_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = QueryTokensByAttributesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc721.Erc721/GetCollectionTokens" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCollectionTokensSvc<T: Erc721>(pub Arc<T>);
+                    impl<
+                        T: Erc721,
+                    > tonic::server::UnaryService<super::GetCollectionTokensRequest>
+                    for GetCollectionTokensSvc<T> {
+                        type Response = super::GetCollectionTokensResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetCollectionTokensRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc721>::get_collection_tokens(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCollectionTokensSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc721.Erc721/GetCollectionTraitFacets" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCollectionTraitFacetsSvc<T: Erc721>(pub Arc<T>);
+                    impl<
+                        T: Erc721,
+                    > tonic::server::UnaryService<super::GetCollectionTraitFacetsRequest>
+                    for GetCollectionTraitFacetsSvc<T> {
+                        type Response = super::GetCollectionTraitFacetsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetCollectionTraitFacetsRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc721>::get_collection_trait_facets(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCollectionTraitFacetsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc721.Erc721/GetCollectionOverview" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCollectionOverviewSvc<T: Erc721>(pub Arc<T>);
+                    impl<
+                        T: Erc721,
+                    > tonic::server::UnaryService<super::GetCollectionOverviewRequest>
+                    for GetCollectionOverviewSvc<T> {
+                        type Response = super::GetCollectionOverviewResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetCollectionOverviewRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc721>::get_collection_overview(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCollectionOverviewSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

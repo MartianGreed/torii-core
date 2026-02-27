@@ -136,13 +136,6 @@ pub struct Config {
     #[arg(long, default_value = "50")]
     pub batch_size: u64,
 
-    /// Maximum number of in-flight block-range batches.
-    ///
-    /// Values > 1 enable extractor prefetching to overlap next-batch fetch/decode
-    /// with current-batch sink processing.
-    #[arg(long, default_value = "2")]
-    pub rpc_max_inflight_batches: usize,
-
     /// Events per RPC request (event mode, max 1024 for most providers)
     #[arg(long, default_value = "1000")]
     pub event_chunk_size: u64,
