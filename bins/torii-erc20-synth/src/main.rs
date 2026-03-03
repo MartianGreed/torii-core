@@ -472,7 +472,11 @@ async fn build_report(
     })
 }
 
+<<<<<<< HEAD
 fn write_artifacts(output_dir: &Path, report: &RunReport) -> Result<()> {
+=======
+fn write_artifacts(output_dir: &PathBuf, report: &RunReport) -> Result<()> {
+>>>>>>> f5d4fff4 (Add synthetic ERC20 end-to-end profiling harness)
     let json_path = output_dir.join("report.json");
     let md_path = output_dir.join("report.md");
     let env_path = output_dir.join("context.env");
@@ -497,7 +501,11 @@ fn write_artifacts(output_dir: &Path, report: &RunReport) -> Result<()> {
 }
 
 #[cfg(feature = "profiling")]
+<<<<<<< HEAD
 fn write_flamegraph(output_dir: &Path, guard: pprof::ProfilerGuard<'_>) -> Result<()> {
+=======
+fn write_flamegraph(output_dir: &PathBuf, guard: pprof::ProfilerGuard<'_>) -> Result<()> {
+>>>>>>> f5d4fff4 (Add synthetic ERC20 end-to-end profiling harness)
     if let Ok(report) = guard.report().build() {
         let file = fs::File::create(output_dir.join("flamegraph.svg"))?;
         report.flamegraph(file)?;
@@ -614,7 +622,11 @@ fn ms(d: Duration) -> f64 {
 fn redact_db_url(db_url: &str) -> String {
     if let Some((scheme, rest)) = db_url.split_once("://") {
         let host_part = rest.rsplit('@').next().unwrap_or(rest);
+<<<<<<< HEAD
         return format!("{scheme}://***@{host_part}");
+=======
+        return format!("{}://***@{}", scheme, host_part);
+>>>>>>> f5d4fff4 (Add synthetic ERC20 end-to-end profiling harness)
     }
     "***".to_string()
 }
