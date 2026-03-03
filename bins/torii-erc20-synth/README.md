@@ -32,3 +32,23 @@ Disable schema reset for append-mode experiments:
 ```bash
 cargo run -p torii-erc20-synth -- --reset-schema false
 ```
+
+Disable activity index writes and dedup conflict checks for pure ingest throughput experiments:
+
+```bash
+cargo run -p torii-erc20-synth --release -- \
+  --disable-activity-index \
+  --disable-dedup \
+  --blocks-per-batch 200
+```
+
+Parity-preserving high-ingest mode (keeps activity + dedup, reduces write amplification and durability costs for benchmarks):
+
+```bash
+cargo run -p torii-erc20-synth --release -- \
+  --defer-secondary-indexes \
+  --unlogged-tables \
+  --pg-sync-commit-off \
+  --disable-activity-constraints \
+  --defer-dedup-constraints
+```
