@@ -111,77 +111,6 @@ pub struct BalanceAdjustment {
 }
 
 impl Erc20Storage {
-    fn defer_secondary_indexes() -> bool {
-        matches!(
-            std::env::var("TORII_ERC20_DEFER_SECONDARY_INDEXES")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn activity_index_enabled() -> bool {
-        !matches!(
-            std::env::var("TORII_ERC20_DISABLE_ACTIVITY_INDEX")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn dedup_enabled() -> bool {
-        !Self::dedup_constraints_deferred()
-            && !matches!(
-                std::env::var("TORII_ERC20_DISABLE_DEDUP")
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-    }
-
-    fn dedup_constraints_deferred() -> bool {
-        matches!(
-            std::env::var("TORII_ERC20_DEFER_DEDUP_CONSTRAINTS")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn use_unlogged_tables() -> bool {
-        matches!(
-            std::env::var("TORII_ERC20_UNLOGGED_TABLES")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn pg_sync_commit_off() -> bool {
-        matches!(
-            std::env::var("TORII_ERC20_PG_SYNC_COMMIT_OFF")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
-    fn disable_activity_constraints() -> bool {
-        matches!(
-            std::env::var("TORII_ERC20_DISABLE_ACTIVITY_CONSTRAINTS")
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    }
-
     /// Create or open the database
     pub async fn new(db_path: &str) -> Result<Self> {
         if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
@@ -200,11 +129,6 @@ impl Erc20Storage {
                         tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
                     }
                 });
-                if Self::pg_sync_commit_off() {
-                    client
-                        .batch_execute("SET synchronous_commit = off; SET jit = off;")
-                        .await?;
-                }
                 pg_conns.push(Arc::new(tokio::sync::Mutex::new(client)));
             }
 
@@ -213,7 +137,9 @@ impl Erc20Storage {
                 .expect("PostgreSQL connection pool must contain at least one client")
                 .clone();
             let client = schema_client.lock().await;
-            let mut schema_sql = r#"
+            client
+                .batch_execute(
+                    r#"
                 CREATE SCHEMA IF NOT EXISTS erc20;
 
                 CREATE TABLE IF NOT EXISTS erc20.transfers (
@@ -306,91 +232,9 @@ impl Erc20Storage {
                     symbol TEXT,
                     decimals BIGINT
                 );
-                "#
-            .to_string();
-            if Self::use_unlogged_tables() {
-                schema_sql = schema_sql.replace(
-                    "CREATE TABLE IF NOT EXISTS erc20.",
-                    "CREATE UNLOGGED TABLE IF NOT EXISTS erc20.",
-                );
-            }
-
-            client.batch_execute(&schema_sql).await?;
-
-            if Self::defer_secondary_indexes() {
-                client
-                    .batch_execute(
-                        r"
-                        DROP INDEX IF EXISTS erc20.idx_transfers_token;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_from;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_to;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_block;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_token_block;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_from_block;
-                        DROP INDEX IF EXISTS erc20.idx_transfers_to_block;
-
-                        DROP INDEX IF EXISTS erc20.idx_approvals_owner;
-                        DROP INDEX IF EXISTS erc20.idx_approvals_spender;
-                        DROP INDEX IF EXISTS erc20.idx_approvals_token;
-
-                        DROP INDEX IF EXISTS erc20.idx_wallet_activity_wallet_block;
-                        DROP INDEX IF EXISTS erc20.idx_wallet_activity_wallet_token;
-                        DROP INDEX IF EXISTS erc20.idx_wallet_activity_transfer;
-
-                        DROP INDEX IF EXISTS erc20.idx_approval_activity_account_block;
-                        DROP INDEX IF EXISTS erc20.idx_approval_activity_account_token;
-                        DROP INDEX IF EXISTS erc20.idx_approval_activity_approval;
-
-                        DROP INDEX IF EXISTS erc20.idx_balances_token;
-                        DROP INDEX IF EXISTS erc20.idx_balances_wallet;
-                        DROP INDEX IF EXISTS erc20.idx_adjustments_wallet;
-                        DROP INDEX IF EXISTS erc20.idx_adjustments_token;
-                        ",
-                    )
-                    .await?;
-                tracing::info!(
-                    target: "torii_erc20::storage",
-                    "Deferred secondary indexes enabled: dropped non-unique ingest indexes"
-                );
-            }
-
-            if Self::disable_activity_constraints() {
-                client
-                    .batch_execute(
-                        r"
-                        ALTER TABLE erc20.wallet_activity
-                          DROP CONSTRAINT IF EXISTS wallet_activity_transfer_id_fkey;
-                        ALTER TABLE erc20.approval_activity
-                          DROP CONSTRAINT IF EXISTS approval_activity_approval_id_fkey;
-                        ALTER TABLE erc20.wallet_activity
-                          DROP CONSTRAINT IF EXISTS wallet_activity_direction_check;
-                        ALTER TABLE erc20.approval_activity
-                          DROP CONSTRAINT IF EXISTS approval_activity_role_check;
-                        ",
-                    )
-                    .await?;
-                tracing::info!(
-                    target: "torii_erc20::storage",
-                    "Activity constraints disabled for ingest benchmarking"
-                );
-            }
-
-            if Self::dedup_constraints_deferred() {
-                client
-                    .batch_execute(
-                        r"
-                        ALTER TABLE erc20.transfers
-                          DROP CONSTRAINT IF EXISTS transfers_token_tx_hash_from_addr_to_addr_key;
-                        ALTER TABLE erc20.approvals
-                          DROP CONSTRAINT IF EXISTS approvals_token_tx_hash_owner_spender_key;
-                        ",
-                    )
-                    .await?;
-                tracing::info!(
-                    target: "torii_erc20::storage",
-                    "Dedup constraints deferred for ingest benchmarking"
-                );
-            }
+                "#,
+                )
+                .await?;
 
             tracing::info!(target: "torii_erc20::storage", pool_size, "PostgreSQL storage initialized");
             return Ok(Self {
@@ -1925,11 +1769,9 @@ impl Erc20Storage {
         }
 
         let client = self.pg_client().await?;
-        let row = if Self::activity_index_enabled() {
-            if Self::dedup_enabled() {
-                client
-                .query_one(
-                    "WITH inserted AS (
+        let row = client
+            .query_one(
+                "WITH inserted AS (
                     INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
                     SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
                     FROM unnest(
@@ -1959,122 +1801,18 @@ impl Erc20Storage {
                     WHERE t.to_addr <> $8::bytea AND t.from_addr <> t.to_addr
                 )
                 SELECT COUNT(*)::bigint FROM inserted",
-                    &[
-                        &token_vec,
-                        &from_vec,
-                        &to_vec,
-                        &amount_vec,
-                        &block_vec,
-                        &tx_hash_vec,
-                        &ts_vec,
-                        &zero_blob,
-                    ],
-                )
-                .await?
-            } else {
-                client
-                    .query_one(
-                        "WITH inserted AS (
-                            INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                            SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
-                            FROM unnest(
-                                $1::bytea[],
-                                $2::bytea[],
-                                $3::bytea[],
-                                $4::bytea[],
-                                $5::bigint[],
-                                $6::bytea[],
-                                $7::bigint[]
-                            ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                            RETURNING id, token, from_addr, to_addr, block_number
-                        ),
-                        _activity AS (
-                            INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                            SELECT t.from_addr, t.token, t.id, 'both', t.block_number
-                            FROM inserted t
-                            WHERE t.from_addr <> $8::bytea AND t.to_addr <> $8::bytea AND t.from_addr = t.to_addr
-                            UNION ALL
-                            SELECT t.from_addr, t.token, t.id, 'sent', t.block_number
-                            FROM inserted t
-                            WHERE t.from_addr <> $8::bytea AND t.from_addr <> t.to_addr
-                            UNION ALL
-                            SELECT t.to_addr, t.token, t.id, 'received', t.block_number
-                            FROM inserted t
-                            WHERE t.to_addr <> $8::bytea AND t.from_addr <> t.to_addr
-                        )
-                        SELECT COUNT(*)::bigint FROM inserted",
-                        &[
-                            &token_vec,
-                            &from_vec,
-                            &to_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                            &zero_blob,
-                        ],
-                    )
-                    .await?
-            }
-        } else {
-            if Self::dedup_enabled() {
-                client
-                    .query_one(
-                        "WITH inserted AS (
-                        INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                        SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
-                        FROM unnest(
-                            $1::bytea[],
-                            $2::bytea[],
-                            $3::bytea[],
-                            $4::bytea[],
-                            $5::bigint[],
-                            $6::bytea[],
-                            $7::bigint[]
-                        ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                        ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
-                        RETURNING id
-                    )
-                    SELECT COUNT(*)::bigint FROM inserted",
-                        &[
-                            &token_vec,
-                            &from_vec,
-                            &to_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                        ],
-                    )
-                    .await?
-            } else {
-                let inserted = client
-                    .execute(
-                        "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                         SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
-                         FROM unnest(
-                            $1::bytea[],
-                            $2::bytea[],
-                            $3::bytea[],
-                            $4::bytea[],
-                            $5::bigint[],
-                            $6::bytea[],
-                            $7::bigint[]
-                         ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)",
-                        &[
-                            &token_vec,
-                            &from_vec,
-                            &to_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                        ],
-                    )
-                    .await?;
-                return Ok(inserted as usize);
-            }
-        };
+                &[
+                    &token_vec,
+                    &from_vec,
+                    &to_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
         Ok(row.get::<usize, i64>(0) as usize)
     }
 
@@ -2107,11 +1845,9 @@ impl Erc20Storage {
         }
 
         let client = self.pg_client().await?;
-        let row = if Self::activity_index_enabled() {
-            if Self::dedup_enabled() {
-                client
-                .query_one(
-                    "WITH inserted AS (
+        let row = client
+            .query_one(
+                "WITH inserted AS (
                     INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
                     SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
                     FROM unnest(
@@ -2141,122 +1877,18 @@ impl Erc20Storage {
                     WHERE a.spender <> $8::bytea AND a.owner <> a.spender
                 )
                 SELECT COUNT(*)::bigint FROM inserted",
-                    &[
-                        &token_vec,
-                        &owner_vec,
-                        &spender_vec,
-                        &amount_vec,
-                        &block_vec,
-                        &tx_hash_vec,
-                        &ts_vec,
-                        &zero_blob,
-                    ],
-                )
-                .await?
-            } else {
-                client
-                    .query_one(
-                        "WITH inserted AS (
-                            INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                            SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
-                            FROM unnest(
-                                $1::bytea[],
-                                $2::bytea[],
-                                $3::bytea[],
-                                $4::bytea[],
-                                $5::bigint[],
-                                $6::bytea[],
-                                $7::bigint[]
-                            ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
-                            RETURNING id, token, owner, spender, block_number
-                        ),
-                        _activity AS (
-                            INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                            SELECT a.owner, a.token, a.id, 'both', a.block_number
-                            FROM inserted a
-                            WHERE a.owner <> $8::bytea AND a.spender <> $8::bytea AND a.owner = a.spender
-                            UNION ALL
-                            SELECT a.owner, a.token, a.id, 'owner', a.block_number
-                            FROM inserted a
-                            WHERE a.owner <> $8::bytea AND a.owner <> a.spender
-                            UNION ALL
-                            SELECT a.spender, a.token, a.id, 'spender', a.block_number
-                            FROM inserted a
-                            WHERE a.spender <> $8::bytea AND a.owner <> a.spender
-                        )
-                        SELECT COUNT(*)::bigint FROM inserted",
-                        &[
-                            &token_vec,
-                            &owner_vec,
-                            &spender_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                            &zero_blob,
-                        ],
-                    )
-                    .await?
-            }
-        } else {
-            if Self::dedup_enabled() {
-                client
-                    .query_one(
-                        "WITH inserted AS (
-                        INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                        SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
-                        FROM unnest(
-                            $1::bytea[],
-                            $2::bytea[],
-                            $3::bytea[],
-                            $4::bytea[],
-                            $5::bigint[],
-                            $6::bytea[],
-                            $7::bigint[]
-                        ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
-                        ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
-                        RETURNING id
-                    )
-                    SELECT COUNT(*)::bigint FROM inserted",
-                        &[
-                            &token_vec,
-                            &owner_vec,
-                            &spender_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                        ],
-                    )
-                    .await?
-            } else {
-                let inserted = client
-                    .execute(
-                        "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                         SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
-                         FROM unnest(
-                            $1::bytea[],
-                            $2::bytea[],
-                            $3::bytea[],
-                            $4::bytea[],
-                            $5::bigint[],
-                            $6::bytea[],
-                            $7::bigint[]
-                         ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)",
-                        &[
-                            &token_vec,
-                            &owner_vec,
-                            &spender_vec,
-                            &amount_vec,
-                            &block_vec,
-                            &tx_hash_vec,
-                            &ts_vec,
-                        ],
-                    )
-                    .await?;
-                return Ok(inserted as usize);
-            }
-        };
+                &[
+                    &token_vec,
+                    &owner_vec,
+                    &spender_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
         Ok(row.get::<usize, i64>(0) as usize)
     }
 

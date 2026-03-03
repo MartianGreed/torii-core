@@ -66,34 +66,6 @@ struct Config {
     /// Drop and recreate `erc20` schema before each run.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     reset_schema: bool,
-
-    /// Disable denormalized activity table writes (`wallet_activity`, `approval_activity`).
-    #[arg(long, default_value_t = false)]
-    disable_activity_index: bool,
-
-    /// Disable dedup conflict checks (`ON CONFLICT DO NOTHING`) for max ingest speed.
-    #[arg(long, default_value_t = false)]
-    disable_dedup: bool,
-
-    /// Defer non-unique secondary index maintenance during ingest.
-    #[arg(long, default_value_t = false)]
-    defer_secondary_indexes: bool,
-
-    /// Create Postgres tables as UNLOGGED for ingestion throughput testing.
-    #[arg(long, default_value_t = false)]
-    unlogged_tables: bool,
-
-    /// Set Postgres session `synchronous_commit=off` (and `jit=off`) for ingest sessions.
-    #[arg(long, default_value_t = false)]
-    pg_sync_commit_off: bool,
-
-    /// Disable FK/check constraints on activity tables during ingest.
-    #[arg(long, default_value_t = false)]
-    disable_activity_constraints: bool,
-
-    /// Defer unique dedup constraints during ingest (rebuild/validate post-run).
-    #[arg(long, default_value_t = false)]
-    defer_dedup_constraints: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,13 +109,6 @@ struct ConfigSnapshot {
     seed: u64,
     db_url_redacted: String,
     reset_schema: bool,
-    disable_activity_index: bool,
-    disable_dedup: bool,
-    defer_secondary_indexes: bool,
-    unlogged_tables: bool,
-    pg_sync_commit_off: bool,
-    disable_activity_constraints: bool,
-    defer_dedup_constraints: bool,
     pg_pool_size_env: Option<String>,
 }
 
@@ -226,49 +191,6 @@ async fn main() -> Result<()> {
 
     if cfg.reset_schema {
         reset_erc20_schema(&cfg.db_url).await?;
-    }
-    let disable_activity_index = cfg.disable_activity_index;
-    let disable_dedup = cfg.disable_dedup;
-    let defer_secondary_indexes = cfg.defer_secondary_indexes;
-    let unlogged_tables = cfg.unlogged_tables;
-    let pg_sync_commit_off = cfg.pg_sync_commit_off;
-    let disable_activity_constraints = cfg.disable_activity_constraints;
-    let defer_dedup_constraints = cfg.defer_dedup_constraints;
-
-    if disable_activity_index {
-        std::env::set_var("TORII_ERC20_DISABLE_ACTIVITY_INDEX", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_DISABLE_ACTIVITY_INDEX");
-    }
-    if disable_dedup {
-        std::env::set_var("TORII_ERC20_DISABLE_DEDUP", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_DISABLE_DEDUP");
-    }
-    if defer_secondary_indexes {
-        std::env::set_var("TORII_ERC20_DEFER_SECONDARY_INDEXES", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_DEFER_SECONDARY_INDEXES");
-    }
-    if unlogged_tables {
-        std::env::set_var("TORII_ERC20_UNLOGGED_TABLES", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_UNLOGGED_TABLES");
-    }
-    if pg_sync_commit_off {
-        std::env::set_var("TORII_ERC20_PG_SYNC_COMMIT_OFF", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_PG_SYNC_COMMIT_OFF");
-    }
-    if disable_activity_constraints {
-        std::env::set_var("TORII_ERC20_DISABLE_ACTIVITY_CONSTRAINTS", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_DISABLE_ACTIVITY_CONSTRAINTS");
-    }
-    if defer_dedup_constraints {
-        std::env::set_var("TORII_ERC20_DEFER_DEDUP_CONSTRAINTS", "1");
-    } else {
-        std::env::remove_var("TORII_ERC20_DEFER_DEDUP_CONSTRAINTS");
     }
 
     let started_wall = chrono::Utc::now();
@@ -527,13 +449,6 @@ async fn build_report(
             seed: cfg.seed,
             db_url_redacted: redact_db_url(&cfg.db_url),
             reset_schema: cfg.reset_schema,
-            disable_activity_index: cfg.disable_activity_index,
-            disable_dedup: cfg.disable_dedup,
-            defer_secondary_indexes: cfg.defer_secondary_indexes,
-            unlogged_tables: cfg.unlogged_tables,
-            pg_sync_commit_off: cfg.pg_sync_commit_off,
-            disable_activity_constraints: cfg.disable_activity_constraints,
-            defer_dedup_constraints: cfg.defer_dedup_constraints,
             pg_pool_size_env: std::env::var("TORII_ERC20_PG_POOL_SIZE").ok(),
         },
         totals: Totals {
