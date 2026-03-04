@@ -42,6 +42,7 @@ pub mod grpc_service;
 pub mod identification;
 pub mod sink;
 pub mod storage;
+pub mod synthetic;
 
 // Include generated protobuf code
 pub mod proto {
@@ -61,3 +62,4 @@ pub use storage::{
     Erc1155BalanceAdjustment, Erc1155BalanceData, Erc1155Storage, TokenTransferData, TokenUriData,
     TransferCursor,
 };
+pub use synthetic::{SyntheticErc1155Config, SyntheticErc1155Extractor};

@@ -6,6 +6,8 @@ pub mod event;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
+pub mod synthetic;
+pub mod synthetic_erc20;
 
 use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
@@ -19,6 +21,8 @@ pub use event::{ContractEventConfig, EventExtractor, EventExtractorConfig};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 pub use starknet_helpers::ContractAbi;
+pub use synthetic::SyntheticExtractor;
+pub use synthetic_erc20::{SyntheticErc20Config, SyntheticErc20Extractor};
 
 /// Block context information
 #[derive(Debug, Clone)]

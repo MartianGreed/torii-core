@@ -4433,6 +4433,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "metrics",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rusqlite",
@@ -4464,6 +4465,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "torii-erc20-synth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pprof",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "torii",
+ "torii-erc20",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4556,6 +4575,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "torii-tokens-synth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pprof",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "torii",
+ "torii-erc1155",
+ "torii-erc20",
+ "torii-erc721",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

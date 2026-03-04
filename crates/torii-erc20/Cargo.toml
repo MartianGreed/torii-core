@@ -43,6 +43,7 @@ axum = "0.7"
 # Utilities
 anyhow = "1.0"
 tracing = "0.1"
+metrics = "0.24"
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -1,0 +1,43 @@
+[package]
+name = "torii-erc20-synth"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "torii-erc20-synth"
+path = "src/main.rs"
+
+[dependencies]
+torii = { path = "../../" }
+torii-erc20 = { path = "../../crates/torii-erc20" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Utilities
+anyhow = "1.0"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# DB reset
+tokio-postgres = "0.7"
+
+# Profiling (optional)
+[dependencies.pprof]
+version = "0.13"
+features = ["flamegraph", "prost-codec"]
+optional = true
+
+[features]
+profiling = ["pprof"]
+
+[lints]
+workspace = true

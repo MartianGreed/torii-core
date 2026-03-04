@@ -137,9 +137,9 @@ impl Erc20Storage {
                 .expect("PostgreSQL connection pool must contain at least one client")
                 .clone();
             let client = schema_client.lock().await;
-
-            client.batch_execute(
-                r"
+            client
+                .batch_execute(
+                    r"
                 CREATE SCHEMA IF NOT EXISTS erc20;
 
                 CREATE TABLE IF NOT EXISTS erc20.transfers (
@@ -233,7 +233,8 @@ impl Erc20Storage {
                     decimals BIGINT
                 );
                 ",
-            ).await?;
+                )
+                .await?;
 
             tracing::info!(target: "torii_erc20::storage", pool_size, "PostgreSQL storage initialized");
             return Ok(Self {
@@ -1767,95 +1768,52 @@ impl Erc20Storage {
             );
         }
 
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-
-        let inserted_rows = tx
-            .query(
-                "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                 SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
-                 FROM unnest(
-                    $1::bytea[],
-                    $2::bytea[],
-                    $3::bytea[],
-                    $4::bytea[],
-                    $5::bigint[],
-                    $6::bytea[],
-                    $7::bigint[]
-                 ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                 ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
-                 RETURNING id, token, from_addr, to_addr, block_number",
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                    SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bigint[],
+                        $6::bytea[],
+                        $7::bigint[]
+                    ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
+                    RETURNING id, token, from_addr, to_addr, block_number
+                ),
+                _activity AS (
+                    INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                    SELECT t.from_addr, t.token, t.id, 'both', t.block_number
+                    FROM inserted t
+                    WHERE t.from_addr <> $8::bytea AND t.to_addr <> $8::bytea AND t.from_addr = t.to_addr
+                    UNION ALL
+                    SELECT t.from_addr, t.token, t.id, 'sent', t.block_number
+                    FROM inserted t
+                    WHERE t.from_addr <> $8::bytea AND t.from_addr <> t.to_addr
+                    UNION ALL
+                    SELECT t.to_addr, t.token, t.id, 'received', t.block_number
+                    FROM inserted t
+                    WHERE t.to_addr <> $8::bytea AND t.from_addr <> t.to_addr
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
                 &[
-                    &token_vec, &from_vec, &to_vec, &amount_vec, &block_vec, &tx_hash_vec, &ts_vec,
+                    &token_vec,
+                    &from_vec,
+                    &to_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
                 ],
             )
             .await?;
-
-        let inserted = inserted_rows.len();
-
-        if inserted > 0 {
-            let mut wallet_vec = Vec::<Vec<u8>>::new();
-            let mut activity_token_vec = Vec::<Vec<u8>>::new();
-            let mut transfer_id_vec = Vec::<i64>::new();
-            let mut direction_vec = Vec::<String>::new();
-            let mut activity_block_vec = Vec::<i64>::new();
-
-            for row in &inserted_rows {
-                let transfer_id: i64 = row.get(0);
-                let token_blob: Vec<u8> = row.get(1);
-                let from_blob: Vec<u8> = row.get(2);
-                let to_blob: Vec<u8> = row.get(3);
-                let block_number: i64 = row.get(4);
-
-                if from_blob != zero_blob && to_blob != zero_blob && from_blob == to_blob {
-                    wallet_vec.push(from_blob.clone());
-                    activity_token_vec.push(token_blob.clone());
-                    transfer_id_vec.push(transfer_id);
-                    direction_vec.push("both".to_string());
-                    activity_block_vec.push(block_number);
-                } else {
-                    if from_blob != zero_blob {
-                        wallet_vec.push(from_blob.clone());
-                        activity_token_vec.push(token_blob.clone());
-                        transfer_id_vec.push(transfer_id);
-                        direction_vec.push("sent".to_string());
-                        activity_block_vec.push(block_number);
-                    }
-                    if to_blob != zero_blob {
-                        wallet_vec.push(to_blob.clone());
-                        activity_token_vec.push(token_blob.clone());
-                        transfer_id_vec.push(transfer_id);
-                        direction_vec.push("received".to_string());
-                        activity_block_vec.push(block_number);
-                    }
-                }
-            }
-
-            if !wallet_vec.is_empty() {
-                tx.execute(
-                    "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                     SELECT i.wallet_address, i.token, i.transfer_id, i.direction, i.block_number
-                     FROM unnest(
-                        $1::bytea[],
-                        $2::bytea[],
-                        $3::bigint[],
-                        $4::text[],
-                        $5::bigint[]
-                     ) AS i(wallet_address, token, transfer_id, direction, block_number)",
-                    &[
-                        &wallet_vec,
-                        &activity_token_vec,
-                        &transfer_id_vec,
-                        &direction_vec,
-                        &activity_block_vec,
-                    ],
-                )
-                .await?;
-            }
-        }
-
-        tx.commit().await?;
-        Ok(inserted)
+        Ok(row.get::<usize, i64>(0) as usize)
     }
 
     async fn pg_insert_approvals_batch(&self, approvals: &[ApprovalData]) -> Result<usize> {
@@ -1886,24 +1844,39 @@ impl Erc20Storage {
             );
         }
 
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-
-        let inserted_rows = tx
-            .query(
-                "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                 SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
-                 FROM unnest(
-                    $1::bytea[],
-                    $2::bytea[],
-                    $3::bytea[],
-                    $4::bytea[],
-                    $5::bigint[],
-                    $6::bytea[],
-                    $7::bigint[]
-                 ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
-                 ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
-                 RETURNING id, token, owner, spender, block_number",
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
+                    SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bigint[],
+                        $6::bytea[],
+                        $7::bigint[]
+                    ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
+                    RETURNING id, token, owner, spender, block_number
+                ),
+                _activity AS (
+                    INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                    SELECT a.owner, a.token, a.id, 'both', a.block_number
+                    FROM inserted a
+                    WHERE a.owner <> $8::bytea AND a.spender <> $8::bytea AND a.owner = a.spender
+                    UNION ALL
+                    SELECT a.owner, a.token, a.id, 'owner', a.block_number
+                    FROM inserted a
+                    WHERE a.owner <> $8::bytea AND a.owner <> a.spender
+                    UNION ALL
+                    SELECT a.spender, a.token, a.id, 'spender', a.block_number
+                    FROM inserted a
+                    WHERE a.spender <> $8::bytea AND a.owner <> a.spender
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
                 &[
                     &token_vec,
                     &owner_vec,
@@ -1912,78 +1885,11 @@ impl Erc20Storage {
                     &block_vec,
                     &tx_hash_vec,
                     &ts_vec,
+                    &zero_blob,
                 ],
             )
             .await?;
-
-        let inserted = inserted_rows.len();
-
-        if inserted > 0 {
-            let mut account_vec = Vec::<Vec<u8>>::new();
-            let mut activity_token_vec = Vec::<Vec<u8>>::new();
-            let mut approval_id_vec = Vec::<i64>::new();
-            let mut role_vec = Vec::<String>::new();
-            let mut activity_block_vec = Vec::<i64>::new();
-
-            for row in &inserted_rows {
-                let approval_id: i64 = row.get(0);
-                let token_blob: Vec<u8> = row.get(1);
-                let owner_blob: Vec<u8> = row.get(2);
-                let spender_blob: Vec<u8> = row.get(3);
-                let block_number: i64 = row.get(4);
-
-                if owner_blob != zero_blob
-                    && spender_blob != zero_blob
-                    && owner_blob == spender_blob
-                {
-                    account_vec.push(owner_blob.clone());
-                    activity_token_vec.push(token_blob.clone());
-                    approval_id_vec.push(approval_id);
-                    role_vec.push("both".to_string());
-                    activity_block_vec.push(block_number);
-                } else {
-                    if owner_blob != zero_blob {
-                        account_vec.push(owner_blob.clone());
-                        activity_token_vec.push(token_blob.clone());
-                        approval_id_vec.push(approval_id);
-                        role_vec.push("owner".to_string());
-                        activity_block_vec.push(block_number);
-                    }
-                    if spender_blob != zero_blob {
-                        account_vec.push(spender_blob.clone());
-                        activity_token_vec.push(token_blob.clone());
-                        approval_id_vec.push(approval_id);
-                        role_vec.push("spender".to_string());
-                        activity_block_vec.push(block_number);
-                    }
-                }
-            }
-
-            if !account_vec.is_empty() {
-                tx.execute(
-                    "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                     SELECT i.account_address, i.token, i.approval_id, i.role, i.block_number
-                     FROM unnest(
-                        $1::bytea[],
-                        $2::bytea[],
-                        $3::bigint[],
-                        $4::text[],
-                        $5::bigint[]
-                     ) AS i(account_address, token, approval_id, role, block_number)",
-                    &[
-                        &account_vec,
-                        &activity_token_vec,
-                        &approval_id_vec,
-                        &role_vec,
-                        &activity_block_vec,
-                    ],
-                )
-                .await?;
-            }
-        }
-
-        tx.commit().await?;
-        Ok(inserted)
+        Ok(row.get::<usize, i64>(0) as usize)
     }
 
     async fn pg_get_transfers_filtered(

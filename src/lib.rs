@@ -833,7 +833,8 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             // Count successfully processed payloads (post-sink processing).
-            ::metrics::counter!("torii_events_processed_total").increment(batch.events.len() as u64);
+            ::metrics::counter!("torii_events_processed_total")
+                .increment(batch.events.len() as u64);
             ::metrics::counter!("torii_transactions_processed_total")
                 .increment(batch.transactions.len() as u64);
 

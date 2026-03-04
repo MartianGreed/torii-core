@@ -377,6 +377,7 @@ impl Sink for Erc20Sink {
 
         // Batch insert transfers
         if !transfers.is_empty() {
+            let insert_transfers_start = std::time::Instant::now();
             let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
@@ -389,6 +390,8 @@ impl Sink for Erc20Sink {
                     return Err(e);
                 }
             };
+            ::metrics::histogram!("torii_erc20_sink_insert_transfers_duration_seconds")
+                .record(insert_transfers_start.elapsed().as_secs_f64());
 
             if transfer_count > 0 {
                 inserted_transfers = transfer_count as u64;
@@ -404,6 +407,7 @@ impl Sink for Erc20Sink {
                 // Update balances if balance tracking is enabled
                 if let Some(ref fetcher) = self.balance_fetcher {
                     // Step 1: Check which balances need adjustment (would go negative)
+                    let check_balances_start = std::time::Instant::now();
                     let adjustment_requests = match self
                         .storage
                         .check_balances_batch(&transfers)
@@ -419,6 +423,8 @@ impl Sink for Erc20Sink {
                             Vec::new()
                         }
                     };
+                    ::metrics::histogram!("torii_erc20_sink_check_balances_duration_seconds")
+                        .record(check_balances_start.elapsed().as_secs_f64());
 
                     // Step 2: Batch fetch actual balances from RPC for inconsistent wallets
                     let mut adjustments: HashMap<(Felt, Felt), U256> = HashMap::new();
@@ -450,6 +456,7 @@ impl Sink for Erc20Sink {
                     }
 
                     // Step 3: Apply transfers with adjustments to update balances
+                    let apply_balances_start = std::time::Instant::now();
                     if let Err(e) = self
                         .storage
                         .apply_transfers_with_adjustments(&transfers, &adjustments)
@@ -462,6 +469,8 @@ impl Sink for Erc20Sink {
                         );
                         // Don't fail the whole batch - transfers are already inserted
                     }
+                    ::metrics::histogram!("torii_erc20_sink_apply_balances_duration_seconds")
+                        .record(apply_balances_start.elapsed().as_secs_f64());
                 }
 
                 // Only broadcast to real-time subscribers when near chain head
@@ -510,6 +519,7 @@ impl Sink for Erc20Sink {
 
         // Batch insert approvals
         if !approvals.is_empty() {
+            let insert_approvals_start = std::time::Instant::now();
             let approval_count = match self.storage.insert_approvals_batch(&approvals).await {
                 Ok(count) => count,
                 Err(e) => {
@@ -522,6 +532,8 @@ impl Sink for Erc20Sink {
                     return Err(e);
                 }
             };
+            ::metrics::histogram!("torii_erc20_sink_insert_approvals_duration_seconds")
+                .record(insert_approvals_start.elapsed().as_secs_f64());
 
             if approval_count > 0 {
                 inserted_approvals = approval_count as u64;

@@ -1,0 +1,139 @@
+name: Bench
+
+on:
+  pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench-synthetic:
+    name: Synthetic Benchmark
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: torii
+          POSTGRES_PASSWORD: torii
+          POSTGRES_DB: torii
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build synth profiler
+        run: cargo build --release -p torii-tokens-synth
+
+      - name: Run ERC20 benchmark
+        env:
+          DATABASE_URL: postgres://torii:torii@localhost:5432/torii
+        run: |
+          ./target/release/torii-tokens-synth erc20 \
+            --db-url "$DATABASE_URL" \
+            --block-count 50 \
+            --tx-per-block 500 \
+            --token-count 8 \
+            --wallet-count 5000 \
+            --output-root perf/ci
+
+      - name: Run ERC721 benchmark
+        env:
+          DATABASE_URL: postgres://torii:torii@localhost:5432/torii
+        run: |
+          ./target/release/torii-tokens-synth erc721 \
+            --db-url "$DATABASE_URL" \
+            --block-count 50 \
+            --tx-per-block 500 \
+            --token-count 8 \
+            --wallet-count 5000 \
+            --output-root perf/ci
+
+      - name: Run ERC1155 benchmark
+        env:
+          DATABASE_URL: postgres://torii:torii@localhost:5432/torii
+        run: |
+          ./target/release/torii-tokens-synth erc1155 \
+            --db-url "$DATABASE_URL" \
+            --block-count 50 \
+            --tx-per-block 500 \
+            --token-count 8 \
+            --wallet-count 5000 \
+            --output-root perf/ci
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 🏋️ Synthetic Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for report in perf/ci/*/report.json; do
+            if [ ! -f "$report" ]; then continue; fi
+
+            token_type=$(jq -r '.token_type' "$report")
+            duration=$(jq -r '.duration_ms' "$report")
+            events=$(jq -r '.totals.events' "$report")
+            blocks=$(jq -r '.totals.blocks' "$report")
+            txs=$(jq -r '.totals.transactions' "$report")
+            evt_per_sec=$(jq -r '.throughput.events_per_sec | floor' "$report")
+            tx_per_sec=$(jq -r '.throughput.tx_per_sec | floor' "$report")
+            blk_per_sec=$(jq -r '.throughput.blocks_per_sec | (. * 100 | floor) / 100' "$report")
+            sink_p50=$(jq -r '.stage_latency_ms.sink.p50_ms | (. * 100 | floor) / 100' "$report")
+            sink_p95=$(jq -r '.stage_latency_ms.sink.p95_ms | (. * 100 | floor) / 100' "$report")
+            sink_p99=$(jq -r '.stage_latency_ms.sink.p99_ms | (. * 100 | floor) / 100' "$report")
+
+            echo "### ${token_type^^}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Duration | ${duration}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| Blocks | ${blocks} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Transactions | ${txs} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Events | ${events} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Events/sec | ${evt_per_sec} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Tx/sec | ${tx_per_sec} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Blocks/sec | ${blk_per_sec} |" >> $GITHUB_STEP_SUMMARY
+            echo "| Sink p50 | ${sink_p50}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| Sink p95 | ${sink_p95}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| Sink p99 | ${sink_p99}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: perf/ci/
+          retention-days: 30
