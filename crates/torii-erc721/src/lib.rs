@@ -40,6 +40,7 @@ pub mod grpc_service;
 pub mod identification;
 pub mod sink;
 pub mod storage;
+pub mod synthetic;
 
 // Include generated protobuf code
 pub mod proto {
@@ -57,3 +58,4 @@ pub use grpc_service::Erc721Service;
 pub use identification::Erc721Rule;
 pub use sink::Erc721Sink;
 pub use storage::{Erc721Storage, NftOwnershipData, NftTransferData, TransferCursor};
+pub use synthetic::{SyntheticErc721Config, SyntheticErc721Extractor};

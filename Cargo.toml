@@ -10,6 +10,7 @@ members = [
     "bins/torii-erc20",
     "bins/torii-erc20-synth",
     "bins/torii-tokens",
+    "bins/torii-tokens-synth",
 ]
 default-members = [
     "bins/torii-erc20",

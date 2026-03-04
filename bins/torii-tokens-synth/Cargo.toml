@@ -1,0 +1,35 @@
+[package]
+name = "torii-tokens-synth"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "torii-tokens-synth"
+path = "src/main.rs"
+
+[dependencies]
+torii = { path = "../../" }
+torii-erc20 = { path = "../../crates/torii-erc20" }
+torii-erc721 = { path = "../../crates/torii-erc721" }
+torii-erc1155 = { path = "../../crates/torii-erc1155" }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio-postgres = "0.7"
+
+[dependencies.pprof]
+version = "0.13"
+features = ["flamegraph", "prost-codec"]
+optional = true
+
+[features]
+profiling = ["pprof"]
+
+[lints]
+workspace = true

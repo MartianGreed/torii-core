@@ -41,6 +41,7 @@ pub mod grpc_service;
 pub mod identification;
 pub mod sink;
 pub mod storage;
+pub mod synthetic;
 
 // Include generated protobuf code
 pub mod proto {
@@ -60,3 +61,4 @@ pub use storage::{
     ApprovalCursor, ApprovalData, BalanceAdjustment, BalanceData, Erc20Storage, TransferCursor,
     TransferData, TransferDirection,
 };
+pub use synthetic::{SyntheticErc20Config, SyntheticErc20Extractor};

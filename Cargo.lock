@@ -4578,6 +4578,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-tokens-synth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pprof",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "torii",
+ "torii-erc1155",
+ "torii-erc20",
+ "torii-erc721",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tower"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
