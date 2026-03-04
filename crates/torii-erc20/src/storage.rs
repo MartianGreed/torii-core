@@ -139,7 +139,7 @@ impl Erc20Storage {
             let client = schema_client.lock().await;
             client
                 .batch_execute(
-                    r#"
+                    r"
                 CREATE SCHEMA IF NOT EXISTS erc20;
 
                 CREATE TABLE IF NOT EXISTS erc20.transfers (
@@ -232,7 +232,7 @@ impl Erc20Storage {
                     symbol TEXT,
                     decimals BIGINT
                 );
-                "#,
+                ",
                 )
                 .await?;
 
