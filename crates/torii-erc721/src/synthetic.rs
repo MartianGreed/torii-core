@@ -309,6 +309,10 @@ impl SyntheticExtractor for SyntheticErc721Extractor {
             self.current_block = Self::parse_cursor(&cursor_str)?.saturating_add(1);
         }
 
+        if self.current_block > self.to_block_inclusive() {
+            self.finished = true;
+        }
+
         if self.finished {
             return Ok(ExtractionBatch::empty());
         }
@@ -406,5 +410,25 @@ mod tests {
             has_batch_metadata_update,
             "Should have BatchMetadataUpdate events"
         );
+    }
+
+    #[tokio::test]
+    async fn synthetic_extractor_returns_empty_after_final_cursor() {
+        let cfg = SyntheticErc721Config {
+            block_count: 1,
+            tx_per_block: 2,
+            blocks_per_batch: 1,
+            from_block: 500,
+            ..Default::default()
+        };
+
+        let mut extractor = SyntheticErc721Extractor::new(cfg).unwrap();
+
+        let batch = extractor.extract(None).await.unwrap();
+        let cursor = batch.cursor.clone().unwrap();
+
+        let resumed = extractor.extract(Some(cursor)).await.unwrap();
+        assert!(resumed.is_empty());
+        assert!(extractor.is_finished());
     }
 }

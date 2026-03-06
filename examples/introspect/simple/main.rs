@@ -11,13 +11,14 @@ use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 const DB_URL: &str = "postgres://user:password@localhost:5432/torii_test";
 // const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
 const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
-const MANAGER_PATH: &str = "~/tc-tests/manager/";
+const MANAGER_PATH: &str = "data/dojo-manager";
 
 #[tokio::main]
 async fn main() {
     let chain_path = resolve_path_like(CHAIN_DATA_PATH);
     let events_path = chain_path.join("events");
     let contracts_path = chain_path.join("model-contracts");
+    // The JSON-backed manager is a local schema cache used by this example.
     let manager = DojoTableStore::new(&PathBuf::from(MANAGER_PATH).resolve().into_owned()).unwrap();
     let provider = FakeProvider::new(contracts_path);
     let event_iterator = EventIterator::new(events_path);

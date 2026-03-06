@@ -340,6 +340,10 @@ impl SyntheticExtractor for SyntheticErc1155Extractor {
             self.current_block = Self::parse_cursor(&cursor_str)?.saturating_add(1);
         }
 
+        if self.current_block > self.to_block_inclusive() {
+            self.finished = true;
+        }
+
         if self.finished {
             return Ok(ExtractionBatch::empty());
         }
@@ -464,5 +468,25 @@ mod tests {
 
         assert!(min_found >= 2, "Min batch size should be >= 2");
         assert!(max_found <= 5, "Max batch size should be <= 5");
+    }
+
+    #[tokio::test]
+    async fn synthetic_extractor_returns_empty_after_final_cursor() {
+        let cfg = SyntheticErc1155Config {
+            block_count: 1,
+            tx_per_block: 2,
+            blocks_per_batch: 1,
+            from_block: 500,
+            ..Default::default()
+        };
+
+        let mut extractor = SyntheticErc1155Extractor::new(cfg).unwrap();
+
+        let batch = extractor.extract(None).await.unwrap();
+        let cursor = batch.cursor.clone().unwrap();
+
+        let resumed = extractor.extract(Some(cursor)).await.unwrap();
+        assert!(resumed.is_empty());
+        assert!(extractor.is_finished());
     }
 }

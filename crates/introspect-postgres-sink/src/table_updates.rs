@@ -7,9 +7,11 @@ use crate::types::variant_member_name;
 use crate::{HasherExt, PgRustEnum, PgStructDef, PostgresField, PostgresType};
 use introspect_types::type_def::TypeName;
 use introspect_types::{
-    ColumnDef, EnumDef, FixedArrayDef, MemberDef, PrimaryDef, PrimaryTypeDef, StructDef, TupleDef,
-    TypeDef, VariantDef,
+    Attribute, ColumnDef, EnumDef, FixedArrayDef, MemberDef, PrimaryDef, PrimaryTypeDef,
+    StructDef, TupleDef, TypeDef, VariantDef,
 };
+use sqlx::{Postgres, Transaction};
+use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::vec;
@@ -55,6 +57,8 @@ pub trait PgMutTableManager {
         tx: &mut Transaction<'_, Postgres>,
     ) -> ManagerResult<()>;
 }
+
+type ManagerResult<T> = Result<T>;
 
 impl<T> From<PoisonError<T>> for TableError {
     fn from(_: PoisonError<T>) -> Self {

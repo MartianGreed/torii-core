@@ -59,7 +59,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
-use crate::etl::extractor::{BlockContext, ExtractionBatch, Extractor, RetryPolicy};
+use crate::etl::extractor::{
+    BlockContext, ExtractionBatch, Extractor, RetryPolicy, TransactionContext,
+};
 
 const EXTRACTOR_TYPE: &str = "event";
 
@@ -374,6 +376,25 @@ impl EventExtractor {
             .filter(|state| state.is_active())
             .map(|state| {
                 let range_end = state.range_end(self.config.block_batch_size, self.chain_head);
+                if state.continuation_token.is_none() {
+                    tracing::info!(
+                        target: "torii::etl::event",
+                        contract = %state.state_key(),
+                        from_block = state.current_block,
+                        to_block = range_end,
+                        following_head = state.is_following_head(),
+                        "Queueing event range request"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "torii::etl::event",
+                        contract = %state.state_key(),
+                        from_block = state.current_block,
+                        to_block = range_end,
+                        continuation_token = %state.continuation_token.as_deref().unwrap_or_default(),
+                        "Queueing paginated event request"
+                    );
+                }
                 let request = ProviderRequestData::GetEvents(GetEventsRequest {
                     filter: EventFilterWithPage {
                         event_filter: EventFilter {
@@ -595,8 +616,22 @@ impl EventExtractor {
             );
         }
 
-        // Build transaction context (minimal - we don't have full tx data from events)
-        let transactions = HashMap::new();
+        // Build minimal transaction context from event receipts.
+        let mut transactions = HashMap::new();
+        for event in &events {
+            if let Some(block_number) = event.block_number {
+                transactions
+                    .entry(event.transaction_hash)
+                    .or_insert_with(|| {
+                        Arc::new(TransactionContext {
+                            hash: event.transaction_hash,
+                            block_number,
+                            sender_address: None,
+                            calldata: Vec::new(),
+                        })
+                    });
+            }
+        }
 
         Ok(ExtractionBatch {
             events,
@@ -725,8 +760,21 @@ impl Extractor for EventExtractor {
                     state.continuation_token = Some(token);
                 } else {
                     // Current range complete, advance to next
+                    let completed_from = state.current_block;
+                    let completed_to =
+                        state.range_end(self.config.block_batch_size, self.chain_head);
                     state.advance_block_range(self.config.block_batch_size, self.chain_head);
                     any_advanced = true;
+
+                    tracing::info!(
+                        target: "torii::etl::event",
+                        contract = %state.state_key(),
+                        range_from = completed_from,
+                        range_to = completed_to,
+                        next_from_block = state.current_block,
+                        events = event_count,
+                        "Completed contract event range"
+                    );
 
                     if state.finished {
                         tracing::info!(
@@ -990,5 +1038,42 @@ mod tests {
         let filtered = EventExtractor::filter_events_by_tx_hashes(events, &successful);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].transaction_hash, keep);
+    }
+
+    #[tokio::test]
+    async fn test_build_batch_populates_transaction_context() {
+        let provider = Arc::new(JsonRpcClient::new(HttpTransport::new(
+            starknet::providers::Url::parse("http://localhost:5050").unwrap(),
+        )));
+        let extractor = EventExtractor::new(provider, EventExtractorConfig::default());
+        let engine_db = EngineDb::new(crate::etl::engine_db::EngineDbConfig {
+            path: "sqlite::memory:".to_string(),
+        })
+        .await
+        .unwrap();
+        let mut timestamps = HashMap::new();
+        timestamps.insert(123, 1);
+        engine_db
+            .insert_block_timestamps(&timestamps)
+            .await
+            .unwrap();
+
+        let tx_hash = Felt::from(42u64);
+        let event = EmittedEvent {
+            from_address: Felt::from(7u64),
+            keys: Vec::new(),
+            data: Vec::new(),
+            block_hash: None,
+            block_number: Some(123),
+            transaction_hash: tx_hash,
+        };
+
+        let batch = extractor
+            .build_batch(vec![event], &engine_db)
+            .await
+            .unwrap();
+        let tx = batch.transactions.get(&tx_hash).unwrap();
+        assert_eq!(tx.hash, tx_hash);
+        assert_eq!(tx.block_number, 123);
     }
 }

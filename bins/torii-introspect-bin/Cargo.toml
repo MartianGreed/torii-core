@@ -1,0 +1,25 @@
+[package]
+name = "torii-introspect-bin"
+version = "0.1.0"
+edition = "2021"
+description = "Dojo introspect indexer for PostgreSQL"
+
+[[bin]]
+name = "torii-introspect-bin"
+path = "src/main.rs"
+
+[dependencies]
+torii = { path = "../../" }
+torii-dojo = { path = "../../crates/dojo" }
+torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+starknet = "0.17"
+url = "2.5"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+
+[lints]
+workspace = true

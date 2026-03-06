@@ -1,9 +1,10 @@
 pub mod json;
 pub mod processor;
-// pub mod sink;
+pub mod sink;
 pub mod sql;
 pub mod table;
 pub mod types;
 pub mod utils;
+pub use sink::IntrospectPostgresSink;
 pub use types::{PgRustEnum, PgStructDef, PgTableStructure, PostgresField, PostgresType};
 pub use utils::{truncate, HasherExt};

@@ -1,22 +1,27 @@
 [workspace]
 members = [
-    ".",
-    "crates/torii-common",
-    "crates/torii-sql-sink",
-    "crates/torii-log-sink",
-    "crates/torii-erc20",
-    "crates/torii-erc721",
-    "crates/torii-erc1155",
-    "crates/introspect",
-    "crates/dojo",
-    "crates/introspect-postgres-sink",
-    "crates/testing",
-    "bins/torii-erc20",
-    "bins/torii-erc20-synth",
-    "bins/torii-tokens",
-    "bins/torii-tokens-synth",
+  ".",
+  "crates/torii-common",
+  "crates/torii-sql-sink",
+  "crates/torii-log-sink",
+  "crates/torii-erc20",
+  "crates/torii-erc721",
+  "crates/torii-erc1155",
+  "crates/introspect",
+  "crates/dojo",
+  "crates/introspect-postgres-sink",
+  "crates/testing",
+  "bins/torii-erc20",
+  "bins/torii-erc20-synth",
+  "bins/torii-introspect-bin",
+  "bins/torii-tokens",
+  "bins/torii-tokens-synth",
 ]
-default-members = ["bins/torii-erc20", "bins/torii-tokens"]
+default-members = [
+  "bins/torii-erc20",
+  "bins/torii-tokens",
+  "bins/torii-introspect-bin",
+]
 resolver = "2"
 
 
@@ -62,10 +67,10 @@ starknet = "0.17"
 
 # Database
 sqlx = { version = "0.8", features = [
-    "runtime-tokio",
-    "sqlite",
-    "postgres",
-    "any",
+  "runtime-tokio",
+  "sqlite",
+  "postgres",
+  "any",
 ] }
 
 # Hashing
@@ -99,10 +104,6 @@ introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "
 introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "0c0fd17" }
 dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "70bfc1b" }
 
-# introspect-events.path = "../introspect/crates/events"
-# introspect-types.path = "../introspect/crates/types"
-# introspect-rust-macros.path = "../introspect/crates/macros"
-# dojo-introspect.path = "../dojo-introspect/"
 
 # Utils
 resolve-path = "0.1.0"
@@ -117,9 +118,9 @@ torii-log-sink.path = "crates/torii-log-sink"
 torii-erc20.path = "crates/torii-erc20"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"
-torii-dojo.path = "crates/dojo"
+torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
-torii-introspect-postgres-sink.path = "crates/introspect-postgres-sink"
+torii-introspect-postgres-sink.path = "./crates/introspect-postgres-sink"
 torii-test-utils.path = "crates/testing"
 
 

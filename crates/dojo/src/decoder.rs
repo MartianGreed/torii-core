@@ -335,9 +335,10 @@ impl<M: DojoTableManager + Sync + Send, F: DojoSchemaFetcher + Sync + Send> Deco
             .split_content()
             .ok_or(DojoToriiError::MissingEventSelector)?;
 
-        self.decode_event_data(selector, keys, data)
-            .await
-            .map(|msg| vec![EventBody::new_envelope(msg, event)])
-            .err_into()
+        match self.decode_event_data(selector, keys, data).await {
+            Ok(msg) => Ok(vec![EventBody::new_envelope(msg, event)]),
+            Err(DojoToriiError::UnknownDojoEventSelector(_)) => Ok(Vec::new()),
+            Err(err) => Err(err.into()),
+        }
     }
 }

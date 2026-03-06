@@ -4,7 +4,7 @@
 //! This will be enhanced with actual Torii features in the future.
 
 use anyhow::{Context, Result};
-use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
+use sqlx::{any::AnyPoolOptions, Any, Pool, Row};
 use starknet::core::types::Felt;
 use std::collections::HashMap;
 use std::path::Path;
@@ -400,17 +400,23 @@ impl EngineDb {
         }
 
         let table = self.table("block_timestamps", "engine.block_timestamps");
+        let placeholders = match self.backend {
+            DbBackend::Sqlite => vec!["?"; block_numbers.len()].join(", "),
+            DbBackend::Postgres => (1..=block_numbers.len())
+                .map(|i| format!("${i}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let sql = format!(
+            "SELECT block_number, timestamp FROM {table} WHERE block_number IN ({placeholders})"
+        );
 
-        let mut query_builder = QueryBuilder::<Any>::new(&format!(
-            "SELECT block_number, timestamp FROM {table} WHERE block_number IN ("
-        ));
-        let mut separated = query_builder.separated(", ");
+        let mut query = sqlx::query(&sql);
         for block_num in block_numbers {
-            separated.push_bind(*block_num as i64);
+            query = query.bind(*block_num as i64);
         }
-        separated.push_unseparated(")");
 
-        let rows = query_builder.build().fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(&self.pool).await?;
 
         let mut result = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
@@ -443,24 +449,41 @@ impl EngineDb {
         // Use chunked multi-row insert to reduce round-trips.
         let timestamp_items: Vec<(u64, u64)> = timestamps.iter().map(|(k, v)| (*k, *v)).collect();
         for chunk in timestamp_items.chunks(CHUNK_SIZE) {
-            let mut query_builder = QueryBuilder::<Any>::new(match self.backend {
+            let mut sql = match self.backend {
                 DbBackend::Sqlite => {
-                    format!("INSERT OR IGNORE INTO {table} (block_number, timestamp) ")
+                    format!("INSERT OR IGNORE INTO {table} (block_number, timestamp) VALUES ")
                 }
                 DbBackend::Postgres => {
-                    format!("INSERT INTO {table} (block_number, timestamp) ")
+                    format!("INSERT INTO {table} (block_number, timestamp) VALUES ")
                 }
-            });
-            query_builder.push_values(chunk, |mut b, (block_number, timestamp)| {
-                b.push_bind(*block_number as i64)
-                    .push_bind(*timestamp as i64);
-            });
+            };
+
+            let mut values = Vec::with_capacity(chunk.len());
+            match self.backend {
+                DbBackend::Sqlite => {
+                    for _ in chunk {
+                        values.push("(?, ?)".to_string());
+                    }
+                }
+                DbBackend::Postgres => {
+                    for (index, _) in chunk.iter().enumerate() {
+                        let param = index * 2;
+                        values.push(format!("(${}, ${})", param + 1, param + 2));
+                    }
+                }
+            }
+            sql.push_str(&values.join(", "));
 
             if self.backend == DbBackend::Postgres {
-                query_builder.push(" ON CONFLICT (block_number) DO NOTHING");
+                sql.push_str(" ON CONFLICT (block_number) DO NOTHING");
             }
 
-            query_builder.build().execute(&mut *tx).await?;
+            let mut query = sqlx::query(&sql);
+            for (block_number, timestamp) in chunk {
+                query = query.bind(*block_number as i64).bind(*timestamp as i64);
+            }
+
+            query.execute(&mut *tx).await?;
         }
 
         tx.commit().await?;

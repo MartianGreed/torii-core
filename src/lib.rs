@@ -34,7 +34,7 @@ use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 use etl::decoder::{ContractFilter, DecoderId};
-use etl::extractor::Extractor;
+use etl::extractor::{Extractor, SyntheticExtractor, SyntheticExtractorAdapter};
 use etl::identification::{ContractIdentifier, IdentificationRule};
 use etl::sink::{EventBus, Sink};
 use etl::{Decoder, DecoderContext, MultiSink, SampleExtractor};
@@ -303,6 +303,18 @@ impl ToriiConfigBuilder {
     /// If not set, a SampleExtractor will be used for testing.
     pub fn with_extractor(mut self, extractor: Box<dyn Extractor>) -> Self {
         self.extractor = Some(extractor);
+        self
+    }
+
+    /// Sets a synthetic extractor wrapped as a regular ETL extractor.
+    ///
+    /// This is intended for tests and local deterministic runs where the full
+    /// ingestion pipeline should execute without a live provider.
+    pub fn with_synthetic_extractor<T>(mut self, extractor: T) -> Self
+    where
+        T: SyntheticExtractor + 'static,
+    {
+        self.extractor = Some(Box::new(SyntheticExtractorAdapter::new(extractor)));
         self
     }
 
@@ -732,6 +744,21 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             let new_cursor = batch.cursor.clone();
 
             if batch.is_empty() {
+                if let Some(ref cursor_str) = new_cursor {
+                    if cursor.as_ref() != Some(cursor_str) {
+                        if let Err(e) = extractor.commit_cursor(cursor_str, &etl_engine_db).await {
+                            tracing::error!(
+                                target: "torii::etl",
+                                "Failed to commit cursor for empty batch: {}",
+                                e
+                            );
+                            ::metrics::counter!("torii_cursor_commit_failures_total").increment(1);
+                        } else {
+                            cursor = new_cursor.clone();
+                        }
+                    }
+                }
+
                 if extractor.is_finished() {
                     tracing::info!(target: "torii::etl", "Extractor finished, stopping ETL loop");
                     ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);

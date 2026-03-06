@@ -3,12 +3,15 @@ use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::DojoSchema;
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{Attributes, PrimaryDef, PrimaryTypeDef, TableSchema};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Row};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use torii_introspect::CreateTable;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -42,8 +45,30 @@ where
 }
 
 impl DojoTableStore<JsonStore> {
+    /// Create a filesystem-backed Dojo table cache.
+    ///
+    /// This JSON store is intended for local caching and examples. Each discovered
+    /// Dojo table schema is serialized as `<table_id>.json` under the provided
+    /// directory so subsequent local runs can inspect or reuse the cached schema
+    /// state. For the main indexer path we use `new_postgres(...)` instead.
     pub fn new<P: Into<PathBuf>>(path: P) -> DojoToriiResult<Self> {
         let store = JsonStore::new(&path.into());
+        Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
+    }
+
+    /// Create a persistent filesystem-backed Dojo table cache.
+    ///
+    /// Unlike `new(...)`, this preserves any existing JSON cache entries already
+    /// present in the directory.
+    pub fn new_persistent<P: Into<PathBuf>>(path: P) -> DojoToriiResult<Self> {
+        let store = JsonStore::new_persistent(&path.into());
+        Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
+    }
+}
+
+impl DojoTableStore<PostgresStore> {
+    pub async fn new_postgres(database_url: &str) -> DojoToriiResult<Self> {
+        let store = PostgresStore::new(database_url).await?;
         Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
     }
 }
@@ -78,27 +103,87 @@ where
     }
 }
 
+/// Local filesystem cache for Dojo table schemas.
+///
+/// The store writes one JSON file per table into a directory such as
+/// `data/dojo-manager`. This is useful for local development and examples, while
+/// the production indexer path persists the same state in Postgres.
 pub struct JsonStore {
     pub path: PathBuf,
 }
 
+pub struct PostgresStore {
+    pool: PgPool,
+}
+
 impl JsonStore {
     pub fn new(path: &PathBuf) -> Self {
-        if !path.exists() {
-            std::fs::create_dir_all(path).expect("Unable to create directory");
+        Self::new_with_options(path, true)
+    }
+
+    pub fn new_persistent(path: &PathBuf) -> Self {
+        Self::new_with_options(path, false)
+    }
+
+    fn new_with_options(path: &PathBuf, clean_on_start: bool) -> Self {
+        if clean_on_start && path.exists() {
+            std::fs::remove_dir_all(path).expect("Unable to clean directory");
         }
 
-        // A temporary flag to clean the store on start, useful when debugging
-        // to avoid existing table error.
-        // TODO: @bengineer42 can be removed or kept being configurable.
-        let clean_on_start = true;
-        if clean_on_start {
-            std::fs::remove_dir_all(path).expect("Unable to clean directory");
-            std::fs::create_dir_all(path).expect("Unable to create directory");
-        }
+        std::fs::create_dir_all(path).expect("Unable to create directory");
 
         Self {
             path: path.to_path_buf(),
+        }
+    }
+}
+
+impl PostgresStore {
+    pub async fn new(database_url: &str) -> DojoToriiResult<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await
+            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
+
+        let store = Self { pool };
+        store
+            .initialize()
+            .await
+            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
+
+        Ok(store)
+    }
+
+    async fn initialize(&self) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS torii_dojo_manager_state (
+                table_id BYTEA PRIMARY KEY,
+                table_json TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    fn block_on<F, T>(&self, future: F) -> Result<T, sqlx::Error>
+    where
+        F: std::future::Future<Output = Result<T, sqlx::Error>>,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+            Err(_) => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(sqlx::Error::Io)?;
+                runtime.block_on(future)
+            }
         }
     }
 }
@@ -160,6 +245,75 @@ impl StoreTrait for JsonStore {
             }
         }
         Ok(tables)
+    }
+}
+
+impl StoreTrait for PostgresStore {
+    type Table = DojoTable;
+    type Error = sqlx::Error;
+
+    fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<(), Self::Error> {
+        let json = serde_json::to_string(data).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        self.block_on(async {
+            sqlx::query(
+                r#"
+                INSERT INTO torii_dojo_manager_state (table_id, table_json, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (table_id)
+                DO UPDATE SET
+                    table_json = EXCLUDED.table_json,
+                    updated_at = NOW()
+                "#,
+            )
+            .bind(table_id.to_bytes_be().to_vec())
+            .bind(json)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn load(&self, table_id: Felt) -> Result<Self::Table, Self::Error> {
+        self.block_on(async {
+            let row = sqlx::query(
+                r#"
+                SELECT table_json
+                FROM torii_dojo_manager_state
+                WHERE table_id = $1
+                "#,
+            )
+            .bind(table_id.to_bytes_be().to_vec())
+            .fetch_one(&self.pool)
+            .await?;
+
+            let json: String = row.try_get("table_json")?;
+            serde_json::from_str(&json).map_err(|e| sqlx::Error::Protocol(e.to_string()))
+        })
+    }
+
+    fn load_all(&self) -> Result<Vec<(Felt, Self::Table)>, Self::Error> {
+        self.block_on(async {
+            let rows = sqlx::query(
+                r#"
+                SELECT table_id, table_json
+                FROM torii_dojo_manager_state
+                ORDER BY updated_at ASC
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await?;
+
+            rows.into_iter()
+                .map(|row| {
+                    let table_id: Vec<u8> = row.try_get("table_id")?;
+                    let table_json: String = row.try_get("table_json")?;
+                    let felt = Felt::from_bytes_be_slice(&table_id);
+                    let table = serde_json::from_str(&table_json)
+                        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+                    Ok((felt, table))
+                })
+                .collect()
+        })
     }
 }
 
@@ -250,5 +404,28 @@ where
             .read()
             .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         Ok(f(&*table_guard))
+    }
+}
+
+impl<Store> DojoTableStore<Store>
+where
+    Store: StoreTrait<Table = DojoTable> + Send + Sync,
+{
+    pub fn create_table_messages(&self) -> DojoToriiResult<Vec<CreateTable>> {
+        let manager = self
+            .read()
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
+
+        manager
+            .tables
+            .values()
+            .map(|table| {
+                let table = table
+                    .read()
+                    .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
+                let schema = table.to_schema();
+                Ok(CreateTable::from(schema))
+            })
+            .collect()
     }
 }

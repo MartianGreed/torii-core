@@ -907,8 +907,8 @@ version = "0.1.0"
 source = "git+https://github.com/dojoengine/dojo-introspect?rev=70bfc1b#70bfc1b25243b1cf83e06d58bc210a30530cedf3"
 dependencies = [
  "async-trait",
- "introspect-rust-macros 0.1.0 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
- "introspect-types 0.1.2 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-rust-macros",
+ "introspect-types",
  "num-traits",
  "serde",
  "starknet",
@@ -1854,21 +1854,10 @@ version = "0.1.2"
 source = "git+https://github.com/cartridge-gg/introspect?rev=0c0fd17#0c0fd17ea29a769d7b90675e05dd976c49667526"
 dependencies = [
  "cainome-cairo-serde",
- "introspect-types 0.1.2 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-types",
  "serde",
  "starknet",
  "starknet-types-core",
-]
-
-[[package]]
-name = "introspect-rust-macros"
-version = "0.1.0"
-dependencies = [
- "paste",
- "proc-macro2",
- "quote",
- "starknet-core",
- "syn",
 ]
 
 [[package]]
@@ -1886,30 +1875,12 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-dependencies = [
- "blake3",
- "convert_case",
- "hex",
- "introspect-rust-macros 0.1.0",
- "lambdaworks-math",
- "num-traits",
- "primitive-types 0.14.0",
- "serde",
- "serde_json",
- "starknet",
- "starknet-types-core",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "introspect-types"
-version = "0.1.2"
 source = "git+https://github.com/cartridge-gg/introspect?rev=0c0fd17#0c0fd17ea29a769d7b90675e05dd976c49667526"
 dependencies = [
  "blake3",
  "convert_case",
  "hex",
- "introspect-rust-macros 0.1.0 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-rust-macros",
  "lambdaworks-math",
  "num-traits",
  "primitive-types 0.14.0",
@@ -4663,9 +4634,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dojo-introspect",
- "introspect-types 0.1.2 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-types",
  "serde",
  "serde_json",
+ "sqlx",
  "starknet",
  "starknet-types-core",
  "thiserror 2.0.18",
@@ -4798,13 +4770,29 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "introspect-events",
- "introspect-rust-macros 0.1.0 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
- "introspect-types 0.1.2 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-rust-macros",
+ "introspect-types",
  "serde",
  "starknet-types-core",
  "thiserror 2.0.18",
  "tonic-build",
  "torii",
+]
+
+[[package]]
+name = "torii-introspect-bin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "starknet",
+ "tokio",
+ "torii",
+ "torii-dojo",
+ "torii-introspect-postgres-sink",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4814,7 +4802,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hex",
- "introspect-types 0.1.2",
+ "introspect-types",
+ "metrics",
  "serde",
  "serde_json",
  "sqlx",
@@ -4879,7 +4868,7 @@ dependencies = [
  "alphanumeric-sort",
  "async-trait",
  "dojo-introspect",
- "introspect-types 0.1.2 (git+https://github.com/cartridge-gg/introspect?rev=0c0fd17)",
+ "introspect-types",
  "resolve-path",
  "serde",
  "serde_json",

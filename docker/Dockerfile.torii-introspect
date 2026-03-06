@@ -11,8 +11,8 @@ ARG TARGETPLATFORM
 WORKDIR /app
 
 # Copy binary from build artifacts
-# Docker build context will have: linux/amd64/torii-tokens, linux/arm64/torii-tokens
-COPY ${TARGETPLATFORM}/torii-tokens /usr/local/bin/torii-introspect
+# Docker build context will have: linux/amd64/torii-introspect, linux/arm64/torii-introspect
+COPY ${TARGETPLATFORM}/torii-introspect /usr/local/bin/torii-introspect
 RUN chmod +x /usr/local/bin/torii-introspect
 
 # Labels
