@@ -9,9 +9,20 @@ use dojo_introspect::events::{
     StoreUpdateRecord,
 };
 use dojo_introspect::DojoSchemaFetcher;
-use introspect_types::FeltIds;
+use introspect_types::{Attribute, FeltIds};
 use starknet_types_core::felt::Felt;
 use torii_introspect::events::{CreateTable, DeleteRecords, InsertsFields, UpdateTable};
+
+pub const MODEL_KIND_ATTRIBUTE: &str = "torii_kind_model";
+pub const EVENT_MESSAGE_KIND_ATTRIBUTE: &str = "torii_kind_event_message";
+
+fn ensure_kind_attribute(schema: &mut dojo_introspect::DojoSchema, attribute: &str) {
+    if !schema.attributes.iter().any(|attr| attr.name == attribute) {
+        schema
+            .attributes
+            .push(Attribute::new_empty(attribute.to_string()));
+    }
+}
 
 #[async_trait]
 impl<Store, F> DojoTableEvent<Store, F> for ModelWithSchemaRegistered
@@ -26,14 +37,11 @@ where
         block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
+        let mut schema = self.schema;
+        ensure_kind_attribute(&mut schema, MODEL_KIND_ATTRIBUTE);
+
         decoder
-            .register_table(
-                owner,
-                &self.namespace,
-                &self.name,
-                self.schema,
-                block_number,
-            )
+            .register_table(owner, &self.namespace, &self.name, schema, block_number)
             .await
             .map(Into::into)
     }
@@ -52,7 +60,8 @@ where
         block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
-        let schema = decoder.fetcher.schema(self.address).await?;
+        let mut schema = decoder.fetcher.schema(self.address).await?;
+        ensure_kind_attribute(&mut schema, MODEL_KIND_ATTRIBUTE);
         decoder
             .register_table(owner, &self.namespace, &self.name, schema, block_number)
             .await
@@ -73,7 +82,8 @@ where
         block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
-        let schema = decoder.fetcher.schema(self.address).await?;
+        let mut schema = decoder.fetcher.schema(self.address).await?;
+        ensure_kind_attribute(&mut schema, EVENT_MESSAGE_KIND_ATTRIBUTE);
         decoder
             .register_table(owner, &self.namespace, &self.name, schema, block_number)
             .await
@@ -94,7 +104,8 @@ where
         block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
-        let schema = decoder.fetcher.schema(self.address).await?;
+        let mut schema = decoder.fetcher.schema(self.address).await?;
+        ensure_kind_attribute(&mut schema, MODEL_KIND_ATTRIBUTE);
         decoder
             .update_table(owner, self.selector, schema, block_number)
             .await
@@ -115,7 +126,8 @@ where
         block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
-        let schema = decoder.fetcher.schema(self.address).await?;
+        let mut schema = decoder.fetcher.schema(self.address).await?;
+        ensure_kind_attribute(&mut schema, EVENT_MESSAGE_KIND_ATTRIBUTE);
         decoder
             .update_table(owner, self.selector, schema, block_number)
             .await

@@ -4630,6 +4630,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-config"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "torii-dojo"
 version = "0.1.0"
 dependencies = [
@@ -4649,6 +4656,34 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-common",
+ "torii-introspect",
+ "torii-postgres-common",
+ "tracing",
+]
+
+[[package]]
+name = "torii-ecs-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "hex",
+ "introspect-types",
+ "itertools 0.14.0",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "torii-dojo",
  "torii-introspect",
  "tracing",
 ]
@@ -4718,10 +4753,10 @@ dependencies = [
  "tonic",
  "tonic-reflection",
  "torii",
+ "torii-config",
  "torii-erc20",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -4738,8 +4773,8 @@ dependencies = [
  "tokio-postgres",
  "torii",
  "torii-erc20",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4797,12 +4832,17 @@ dependencies = [
  "sqlx",
  "starknet",
  "tokio",
+ "tonic",
+ "tonic-reflection",
+ "tonic-web",
  "torii",
+ "torii-config",
  "torii-dojo",
+ "torii-ecs-sink",
  "torii-introspect-postgres-sink",
+ "torii-postgres-common",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -4823,6 +4863,7 @@ dependencies = [
  "tokio",
  "torii",
  "torii-introspect",
+ "torii-postgres-common",
  "tracing",
  "xxhash-rust",
 ]
@@ -4846,8 +4887,8 @@ dependencies = [
  "torii",
  "torii-dojo",
  "torii-introspect-postgres-sink",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4871,6 +4912,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-postgres-common"
+version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "torii-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "starknet",
+ "torii",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "torii-sql-sink"
 version = "0.1.0"
 dependencies = [
@@ -4891,6 +4951,7 @@ dependencies = [
  "tonic-build",
  "tonic-web",
  "torii",
+ "torii-postgres-common",
  "tracing",
 ]
 
@@ -4923,12 +4984,12 @@ dependencies = [
  "tonic-web",
  "torii",
  "torii-common",
+ "torii-config",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -4947,8 +5008,8 @@ dependencies = [
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

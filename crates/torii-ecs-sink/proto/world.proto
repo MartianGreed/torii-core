@@ -1,0 +1,76 @@
+syntax = "proto3";
+package world;
+
+import "types.proto";
+import "google/protobuf/empty.proto";
+
+service World {
+  rpc SubscribeContracts (SubscribeContractsRequest) returns (stream SubscribeContractsResponse);
+  rpc Worlds (WorldsRequest) returns (WorldsResponse);
+  rpc SubscribeEntities (SubscribeEntitiesRequest) returns (stream SubscribeEntityResponse);
+  rpc UpdateEntitiesSubscription (UpdateEntitiesSubscriptionRequest) returns (google.protobuf.Empty);
+  rpc RetrieveEntities (RetrieveEntitiesRequest) returns (RetrieveEntitiesResponse);
+  rpc SubscribeEventMessages (SubscribeEntitiesRequest) returns (stream SubscribeEntityResponse);
+  rpc UpdateEventMessagesSubscription (UpdateEntitiesSubscriptionRequest) returns (google.protobuf.Empty);
+  rpc RetrieveEventMessages (RetrieveEntitiesRequest) returns (RetrieveEntitiesResponse);
+  rpc RetrieveEvents (RetrieveEventsRequest) returns (RetrieveEventsResponse);
+  rpc SubscribeEvents (SubscribeEventsRequest) returns (stream SubscribeEventsResponse);
+}
+
+message SubscribeContractsRequest {
+  types.ContractQuery query = 1;
+}
+
+message SubscribeContractsResponse {
+  types.Contract contract = 1;
+}
+
+message WorldsRequest {
+  repeated bytes world_addresses = 1;
+}
+
+message WorldsResponse {
+  repeated types.World worlds = 1;
+}
+
+message SubscribeEntitiesRequest {
+  types.Clause clause = 1;
+  repeated bytes world_addresses = 2;
+}
+
+message UpdateEntitiesSubscriptionRequest {
+  uint64 subscription_id = 1;
+  types.Clause clause = 2;
+  repeated bytes world_addresses = 3;
+}
+
+message SubscribeEntityResponse {
+  types.Entity entity = 1;
+  uint64 subscription_id = 2;
+}
+
+message RetrieveEntitiesRequest {
+  types.Query query = 1;
+}
+
+message RetrieveEntitiesResponse {
+  string next_cursor = 1;
+  repeated types.Entity entities = 2;
+}
+
+message RetrieveEventsRequest {
+  types.EventQuery query = 1;
+}
+
+message RetrieveEventsResponse {
+  string next_cursor = 1;
+  repeated types.Event events = 2;
+}
+
+message SubscribeEventsRequest {
+  repeated types.KeysClause keys = 1;
+}
+
+message SubscribeEventsResponse {
+  types.Event event = 1;
+}

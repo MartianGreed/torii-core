@@ -1,0 +1,147 @@
+syntax = "proto3";
+package types;
+
+import "schema.proto";
+
+message World {
+  string world_address = 1;
+  repeated Model models = 2;
+}
+
+message Model {
+  bytes selector = 1;
+  string namespace = 2;
+  string name = 3;
+  uint32 packed_size = 4;
+  uint32 unpacked_size = 5;
+  bytes class_hash = 6;
+  bytes layout = 7;
+  bytes schema = 8;
+  bytes contract_address = 9;
+  bool use_legacy_store = 10;
+  bytes world_address = 11;
+}
+
+message Entity {
+  bytes hashed_keys = 1;
+  repeated Struct models = 2;
+  uint64 created_at = 3;
+  uint64 updated_at = 4;
+  uint64 executed_at = 5;
+  bytes world_address = 6;
+}
+
+message Event {
+  repeated bytes keys = 1;
+  repeated bytes data = 2;
+  bytes transaction_hash = 3;
+}
+
+message Pagination {
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message Query {
+  Clause clause = 1;
+  bool no_hashed_keys = 2;
+  repeated string models = 3;
+  Pagination pagination = 4;
+  bool historical = 5;
+  repeated bytes world_addresses = 6;
+}
+
+message EventQuery {
+  KeysClause keys = 1;
+  Pagination pagination = 2;
+}
+
+message Clause {
+  oneof clause_type {
+    HashedKeysClause hashed_keys = 1;
+    KeysClause keys = 2;
+    MemberClause member = 3;
+    CompositeClause composite = 4;
+  }
+}
+
+message HashedKeysClause {
+  repeated bytes hashed_keys = 1;
+}
+
+message KeysClause {
+  repeated bytes keys = 1;
+  PatternMatching pattern_matching = 2;
+  repeated string models = 3;
+}
+
+message MemberValue {
+  oneof value_type {
+    Primitive primitive = 1;
+    string string = 2;
+    MemberValueList list = 3;
+  }
+}
+
+message MemberValueList {
+  repeated MemberValue values = 1;
+}
+
+message MemberClause {
+  string model = 1;
+  string member = 2;
+  ComparisonOperator operator = 3;
+  MemberValue value = 4;
+}
+
+message CompositeClause {
+  LogicalOperator operator = 1;
+  repeated Clause clauses = 2;
+}
+
+enum PatternMatching {
+  FixedLen = 0;
+  VariableLen = 1;
+}
+
+enum LogicalOperator {
+  AND = 0;
+  OR = 1;
+}
+
+enum ComparisonOperator {
+  EQ = 0;
+  NEQ = 1;
+  GT = 2;
+  GTE = 3;
+  LT = 4;
+  LTE = 5;
+  IN = 6;
+  NOT_IN = 7;
+  CONTAINS = 8;
+  CONTAINS_ALL = 9;
+  CONTAINS_ANY = 10;
+  ARRAY_LENGTH_EQ = 11;
+  ARRAY_LENGTH_GT = 12;
+  ARRAY_LENGTH_LT = 13;
+}
+
+enum ContractType {
+  WORLD = 0;
+}
+
+message Contract {
+  bytes contract_address = 1;
+  ContractType contract_type = 2;
+  optional uint64 head = 3;
+  optional uint64 tps = 4;
+  optional uint64 last_block_timestamp = 5;
+  optional bytes last_pending_block_tx = 6;
+  uint64 updated_at = 7;
+  uint64 created_at = 8;
+}
+
+message ContractQuery {
+  repeated bytes contract_addresses = 1;
+  repeated ContractType contract_types = 2;
+}

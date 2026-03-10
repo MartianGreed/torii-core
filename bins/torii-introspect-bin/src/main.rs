@@ -5,9 +5,9 @@ mod config;
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
-use sqlx::postgres::PgPoolOptions;
 use starknet::core::types::Felt;
 use std::sync::Arc;
+use tonic::transport::Server;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
@@ -16,17 +16,15 @@ use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::manager::{DojoTableStore, MergedStore, PostgresStore, SchemaBootstrapPoint};
 use torii_dojo::store::postgres::initialize_dojo_schema;
 use torii_dojo::store::DojoStoreTrait;
+use torii_ecs_sink::proto::world::world_server::WorldServer;
+use torii_ecs_sink::EcsSink;
 use torii_introspect_postgres_sink::IntrospectPostgresSink;
+use torii_postgres_common::{connect, table_exists};
+use torii_runtime::{configure_observability, init_tracing, starknet_provider};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .init();
+    init_tracing()?;
 
     let config = Config::parse();
     run_indexer(config).await
@@ -35,21 +33,16 @@ async fn main() -> Result<()> {
 async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Starting Torii Introspect Indexer");
 
-    let metrics_enabled = if config.observability {
-        "true"
-    } else {
-        "false"
-    };
-    std::env::set_var("TORII_METRICS_ENABLED", metrics_enabled);
+    configure_observability(config.observability.observability);
 
     let storage_database_url = config.storage_database_url()?.to_string();
     let engine_database_url = config.engine_database_url();
     let contracts = config.contract_addresses()?;
 
-    tracing::info!("RPC URL: {}", config.rpc_url);
+    tracing::info!("RPC URL: {}", config.rpc.rpc_url);
     tracing::info!("Contracts: {}", contracts.len());
-    tracing::info!("From block: {}", config.from_block);
-    if let Some(to_block) = config.to_block {
+    tracing::info!("From block: {}", config.blocks.from_block);
+    if let Some(to_block) = config.blocks.to_block {
         tracing::info!("To block: {}", to_block);
     } else {
         tracing::info!("To block: following chain head");
@@ -58,19 +51,15 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Storage database URL: {}", storage_database_url);
     tracing::info!(
         "Observability: {}",
-        if config.observability {
+        if config.observability.observability {
             "enabled"
         } else {
             "disabled"
         }
     );
 
-    let provider = starknet::providers::jsonrpc::JsonRpcClient::new(
-        starknet::providers::jsonrpc::HttpTransport::new(
-            url::Url::parse(&config.rpc_url).expect("Invalid RPC URL"),
-        ),
-    );
-    let extractor_provider = Arc::new(provider.clone());
+    let extractor_provider = starknet_provider(&config.rpc.rpc_url)?;
+    let provider = (*extractor_provider).clone();
 
     let extractor = Box::new(EventExtractor::new(
         extractor_provider.clone(),
@@ -80,22 +69,22 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .copied()
                 .map(|address| ContractEventConfig {
                     address,
-                    from_block: config.from_block,
-                    to_block: config.to_block.unwrap_or(u64::MAX),
+                    from_block: config.blocks.from_block,
+                    to_block: config.blocks.to_block.unwrap_or(u64::MAX),
                 })
                 .collect(),
-            chunk_size: config.event_chunk_size,
-            block_batch_size: config.event_block_batch_size,
+            chunk_size: config.event_extraction.event_chunk_size,
+            block_batch_size: config.event_extraction.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
-            ignore_saved_state: config.ignore_saved_state,
+            ignore_saved_state: config.event_extraction.ignore_saved_state,
         },
     ));
 
     let bootstrap_points = resolve_bootstrap_points(
         &storage_database_url,
         &contracts,
-        config.from_block,
-        config.ignore_saved_state,
+        config.blocks.from_block,
+        config.event_extraction.ignore_saved_state,
     )
     .await?;
     for point in &bootstrap_points {
@@ -128,10 +117,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         );
     }
 
-    let secondary_store = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&storage_database_url)
-        .await?;
+    let secondary_store = connect(&storage_database_url, Some(5)).await?;
     initialize_dojo_schema(&secondary_store).await?;
     let merged_store = MergedStore::new(primary_store, secondary_store);
     let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
@@ -161,16 +147,30 @@ async fn run_indexer(config: Config) -> Result<()> {
     let decoder: DojoDecoder<DojoTableStore<MergedStore<PostgresStore, _>>, _> =
         DojoDecoder::with_tables(metadata_store, provider, preloaded_tables);
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
+    let ecs_sink = EcsSink::new(&storage_database_url).await?;
+    let ecs_grpc = ecs_sink.get_grpc_service_impl();
+
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(torii_ecs_sink::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let grpc_router = Server::builder()
+        .accept_http1(true)
+        .add_service(tonic_web::enable(WorldServer::new((*ecs_grpc).clone())))
+        .add_service(tonic_web::enable(reflection));
 
     let mut torii_config = torii::ToriiConfig::builder()
-        .port(config.port)
+        .port(config.server.port)
         .engine_database_url(engine_database_url)
+        .with_grpc_router(grpc_router)
+        .with_custom_reflection(true)
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(
-            IntrospectPostgresSink::new(storage_database_url, config.max_db_connections)
+            IntrospectPostgresSink::new(storage_database_url, config.postgres.max_db_connections)
                 .with_bootstrap_tables(bootstrap_tables),
-        ));
+        ))
+        .add_sink_boxed(Box::new(ecs_sink));
 
     let decoder_id = DecoderId::new("dojo-introspect");
     for contract in contracts {
@@ -179,8 +179,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     }
 
     tracing::info!("Torii configured, starting ETL pipeline...");
-    tracing::info!("gRPC service available on port {}", config.port);
+    tracing::info!("gRPC service available on port {}", config.server.port);
     tracing::info!("  - torii.Torii (core subscriptions and metrics endpoint)");
+    tracing::info!("  - world.World (legacy Dojo ECS queries and subscriptions)");
 
     torii::run(torii_config.build())
         .await
@@ -208,23 +209,11 @@ async fn resolve_bootstrap_points(
             .collect());
     }
 
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await?;
+    let pool = connect(database_url, Some(1)).await?;
 
-    let engine_table_exists: bool = sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = 'engine' AND table_name = 'extractor_state'
-        )
-        ",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap_or(false);
+    let engine_table_exists = table_exists(&pool, "engine", "extractor_state")
+        .await
+        .unwrap_or(false);
 
     if !engine_table_exists {
         return Ok(contracts
